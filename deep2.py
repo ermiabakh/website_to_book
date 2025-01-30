@@ -28,7 +28,7 @@ class AsyncCrawler:
         self.retry_count = retry_count
         self.retry_delay = retry_delay
 
-    def is_valid_url(self, url: str) -> bool:
+    async def is_valid_url(self, url: str) -> bool:
         parsed = urlparse(url)
         if parsed.netloc != self.base_domain:
             return False
