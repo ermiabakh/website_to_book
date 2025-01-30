@@ -23,6 +23,7 @@ class Crawler:
         self.to_visit = []
         self.base_domain = urlparse(root_url).netloc
         self.base_path = urlparse(root_url).path.rstrip('/')
+        self.progress_bar = None
 
     def is_valid_url(self, url: str) -> bool:
         parsed = urlparse(url)
@@ -48,7 +49,11 @@ class Crawler:
         self.to_visit = [(self.root_url, 0)]
         ordered_urls = []
 
-        with sync_playwright() as p:
+        with sync_playwright() as p, \
+            tqdm(desc=f"Crawling {self.root_url}", unit="page", 
+                bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]") as pbar:
+
+            self.progress_bar = pbar
             browser = p.chromium.launch(headless=True)
             
             while self.to_visit:
@@ -72,10 +77,19 @@ class Crawler:
                             self.visited.add(link)
                             self.to_visit.append((link, depth + 1))
                     
-                    time.sleep(0.5)  # Polite delay
+                    # Update progress bar
+                    pbar.total = len(self.visited) + len(self.to_visit)
+                    pbar.set_postfix({
+                        'depth': depth,
+                        'queued': len(self.to_visit),
+                        'found': len(self.visited)
+                    })
+                    pbar.update(1)
+                    time.sleep(0.5)
                 
                 except Exception as e:
                     logging.error(f"Error crawling {url}: {str(e)}")
+                    pbar.write(f"Error crawling {url}: {str(e)}")
             
             browser.close()
         
@@ -92,13 +106,9 @@ def generate_pdf(task: Tuple[int, str, Path]) -> Tuple[int, str, bool]:
             
             page.goto(url, timeout=60000)
             page.wait_for_selector('body', timeout=30000)
-            
-            # Try to wait for main content (customize selector as needed)
             page.wait_for_selector('main', timeout=5000)
             
             title = page.title()
-            
-            # Generate PDF with print styles
             page.emulate_media(media='print')
             page.pdf(
                 path=str(pdf_path),
@@ -119,21 +129,22 @@ def merge_pdfs(pdf_files: List[Tuple[int, str]], output_path: str, temp_dir: Pat
     merged = fitz.open()
     toc = []
     
-    # Sort by original index
     pdf_files.sort(key=lambda x: x[0])
     
-    for index, title in pdf_files:
-        pdf_path = temp_dir / f"page_{index:04d}.pdf"
-        if not pdf_path.exists():
-            continue
-        
-        with fitz.open(pdf_path) as doc:
-            merged.insert_pdf(doc)
-            # Add bookmark at first page of each document
-            toc.append([1, title, merged.page_count - doc.page_count])
-        
-        pdf_path.unlink()  # Clean up temp file
-    
+    with tqdm(pdf_files, desc="Merging PDFs", unit="page", 
+             bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]") as pbar:
+        for index, title in pbar:
+            pdf_path = temp_dir / f"page_{index:04d}.pdf"
+            if not pdf_path.exists():
+                continue
+            
+            with fitz.open(pdf_path) as doc:
+                merged.insert_pdf(doc)
+                toc.append([1, title, merged.page_count - doc.page_count])
+            
+            pdf_path.unlink()
+            pbar.set_postfix({'current': title[:20] + '...'})
+
     merged.set_toc(toc)
     merged.save(output_path, deflate=True, garbage=4)
     merged.close()
@@ -154,31 +165,59 @@ def main():
     temp_dir = Path(args.temp_dir)
     temp_dir.mkdir(exist_ok=True)
     
-    # Step 1: Crawl website
-    print("Crawling website...")
+    print(f"\n{' Starting PDF Generator ':=^50}")
+    print(f"Root URL: {args.url}")
+    print(f"Max Depth: {args.max_depth}")
+    print(f"Workers: {args.workers}\n")
+    
+    # Crawling phase
     crawler = Crawler(args.url, args.max_depth)
     urls = crawler.crawl()
-    print(f"Found {len(urls)} pages to convert")
     
-    # Step 2: Generate PDFs in parallel
-    print("Generating PDFs...")
+    print(f"\n{' Conversion Phase ':=^50}")
+    print(f"Total unique pages found: {len(urls)}")
+    print(f"Starting PDF generation with {args.workers} workers...\n")
+    
+    # PDF Generation phase
     tasks = [(i, url, temp_dir) for i, url in enumerate(urls, 1)]
+    success_count = 0
+    failed_urls = []
     
     with multiprocessing.Pool(processes=args.workers) as pool:
-        results = []
-        for result in tqdm(pool.imap(generate_pdf, tasks), total=len(tasks)):
-            results.append(result)
+        with tqdm(total=len(tasks), desc="Generating PDFs", unit="page",
+                 bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{percent:.0%}] {postfix}") as pbar:
+            results = []
+            for result in pool.imap(generate_pdf, tasks):
+                index, title, success = result
+                results.append(result)
+                
+                if success:
+                    success_count += 1
+                    pbar.set_postfix_str(f"Last: {title[:30]}...")
+                else:
+                    failed_urls.append((index, title))
+                
+                pbar.update(1)
     
-    # Filter successful results
+    # Merging phase
+    print(f"\n{' Merging Phase ':=^50}")
+    print(f"Successfully converted {success_count}/{len(urls)} pages")
     successful = [(i, t) for i, t, success in results if success]
     
-    # Step 3: Merge PDFs
-    print("Merging PDFs...")
-    merge_pdfs(successful, args.output, temp_dir)
+    if successful:
+        merge_pdfs(successful, args.output, temp_dir)
+        print(f"\n{' Final Stats ':=^50}")
+        print(f"Total pages crawled: {len(urls)}")
+        print(f"Successfully converted: {success_count}")
+        print(f"Failed conversions: {len(urls) - success_count}")
+        print(f"Final PDF size: {Path(args.output).stat().st_size / 1024:.1f} KB")
+    else:
+        print("No pages converted successfully!")
     
     # Cleanup
     temp_dir.rmdir()
-    print(f"Done! Output saved to {args.output}")
+    print(f"\n{' Done! ':=^50}")
+    print(f"Output saved to: {args.output}\n")
 
 if __name__ == "__main__":
     main()
