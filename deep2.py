@@ -1,9 +1,10 @@
 import argparse
 import asyncio
 import logging
-import multiprocessing
+import concurrent.futures
 import re
 import time
+import multiprocessing  # Import multiprocessing
 from pathlib import Path
 from typing import List, Tuple
 from urllib.parse import urljoin, urlparse
@@ -16,6 +17,7 @@ from tqdm import tqdm
 logging.basicConfig(filename='crawler.log', level=logging.ERROR)
 
 class Crawler:
+    # ... (Rest of the Crawler class remains unchanged)
     def __init__(self, root_url: str, max_depth: int = 3):
         self.root_url = root_url
         self.max_depth = max_depth
@@ -115,37 +117,50 @@ class Crawler:
             logging.error(f"Error crawling {url}: {str(e)}")
             self.progress_bar.write(f"Error crawling {url}: {str(e)}")
             return None, None, []
-            
-async def generate_pdf(task: Tuple[int, str, Path, asyncio.Queue]) -> Tuple[int, str, bool]:
-    index, url, temp_dir, page_queue = task
-    pdf_path = temp_dir / f"page_{index:04d}.pdf"
 
+async def generate_pdf_batch(tasks: List[Tuple[int, str, Path]], batch_index: int) -> List[Tuple[int, str, bool]]:
+    results = []
     try:
-        page = await page_queue.get()  # Get page from the queue
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context()
+            page = await context.new_page()
 
-        await page.goto(url, timeout=60000)
-        await page.wait_for_selector('body', timeout=30000)
-        try:
-            await page.wait_for_selector('main', timeout=5000)
-        except:
-            pass
+            with tqdm(total=len(tasks), desc=f"Generating PDFs (Batch {batch_index})", unit="page",
+                      bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{percentage:.0f}%] {postfix}") as pbar:
 
-        title = await page.title()
-        await page.emulate_media(media='print')
-        await page.pdf(
-            path=str(pdf_path),
-            format='A4',
-            print_background=True,
-            margin={'top': '20mm', 'right': '20mm',
-                    'bottom': '20mm', 'left': '20mm'}
-        )
+                for index, url, temp_dir in tasks:
+                    pdf_path = temp_dir / f"page_{index:04d}.pdf"
+                    try:
+                        await page.goto(url, timeout=60000)
+                        await page.wait_for_selector('body', timeout=30000)
+                        try:
+                            await page.wait_for_selector('main', timeout=5000)
+                        except:
+                            pass
 
-        page_queue.put_nowait(page)  # Put page back into the queue
-        return (index, title, True)
+                        title = await page.title()
+                        await page.emulate_media(media='print')
+                        await page.pdf(
+                            path=str(pdf_path),
+                            format='A4',
+                            print_background=True,
+                            margin={'top': '20mm', 'right': '20mm',
+                                    'bottom': '20mm', 'left': '20mm'}
+                        )
+                        results.append((index, title, True))
+                        pbar.set_postfix_str(f"Last: {title[:30]}...")
+                    except Exception as e:
+                        logging.error(f"Error generating PDF for {url}: {str(e)}")
+                        results.append((index, "", False))
+                    finally:
+                        pbar.update(1)
 
+            await browser.close()
     except Exception as e:
-        logging.error(f"Error generating PDF for {url}: {str(e)}")
-        return (index, "", False)
+        logging.error(f"Error in batch {batch_index}: {str(e)}")
+
+    return results
 
 def merge_pdfs(pdf_files: List[Tuple[int, str]], output_path: str, temp_dir: Path):
     merged = fitz.open()
@@ -173,88 +188,75 @@ def merge_pdfs(pdf_files: List[Tuple[int, str]], output_path: str, temp_dir: Pat
     merged.save(output_path, deflate=True, garbage=4)
     merged.close()
 
+async def run_pdf_generation(tasks, workers, temp_dir):
+    """
+    Generates PDFs in batches using a ProcessPoolExecutor.
+    """
+    batch_size = 50  # Define your batch size
+    batches = [tasks[i:i + batch_size] for i in range(0, len(tasks), batch_size)]
+    results = []
+
+    with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
+        loop = asyncio.get_event_loop()
+        futures = [
+            loop.run_in_executor(executor, generate_pdf_batch_sync, batch, i + 1, temp_dir)
+            for i, batch in enumerate(batches)
+        ]
+        for future in tqdm(asyncio.as_completed(futures), total=len(futures), desc="Overall Progress", unit="batch"):
+            result = await future
+            results.extend(result)
+
+    return results
+
+def generate_pdf_batch_sync(batch, batch_index, temp_dir):
+    """
+    Synchronous wrapper for generate_pdf_batch to be used with ProcessPoolExecutor.
+    """
+    async def wrapper():
+        return await generate_pdf_batch(batch, batch_index)
+    return asyncio.run(wrapper())
+
 async def main():
     parser = argparse.ArgumentParser(description='Website to PDF Book Converter')
     parser.add_argument('url', help='Root URL to start crawling')
     parser.add_argument('output', help='Output PDF filename')
-    parser.add_argument('--max-depth', type=int, default=2, 
-                       help='Maximum crawl depth (default: 2)')
+    parser.add_argument('--max-depth', type=int, default=2,
+                        help='Maximum crawl depth (default: 2)')
     parser.add_argument('--workers', type=int, default=4,
-                       help='Number of parallel workers (default: 4)')
+                        help='Number of parallel workers (default: 4)')
     parser.add_argument('--temp-dir', default='temp_pages',
-                       help='Temporary directory for PDFs (default: temp_pages)')
-    
+                        help='Temporary directory for PDFs (default: temp_pages)')
+
     args = parser.parse_args()
-    
+
     temp_dir = Path(args.temp_dir)
     temp_dir.mkdir(exist_ok=True)
-    
+
     print(f"\n{' Starting PDF Generator ':=^50}")
     print(f"Root URL: {args.url}")
     print(f"Max Depth: {args.max_depth}")
     print(f"Workers: {args.workers}\n")
-    
+
     # Crawling phase
     crawler = Crawler(args.url, args.max_depth)
-    
-    
-    async def run_crawler():
-      return await crawler.crawl()
+    urls = await crawler.crawl()
 
-    urls = await run_crawler()
-    
     print(f"\n{' Conversion Phase ':=^50}")
     print(f"Total unique pages found: {len(urls)}")
     print(f"Starting PDF generation with {args.workers} workers...\n")
-    
+
     # PDF Generation phase
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context()
+    tasks = [(i, url, temp_dir) for i, url in enumerate(urls, 1)]
+    results = await run_pdf_generation(tasks, args.workers, temp_dir)
 
-        page_queue = asyncio.Queue()
-        for _ in range(multiprocessing.cpu_count() * 2):  # Create a queue of pages
-            page = await context.new_page()
-            await page_queue.put(page)
-
-        tasks = [(i, url, temp_dir, page_queue) for i, url in enumerate(urls, 1)]
-        success_count = 0
-        failed_urls = []
-    
-        async def run_pdf_generation():
-            nonlocal success_count
-            
-            pdf_tasks = [generate_pdf(task) for task in tasks]
-            
-            with tqdm(total=len(pdf_tasks), desc="Generating PDFs", unit="page",
-                    bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{percentage:.0f}%] {postfix}") as pbar:
-                
-                results = []
-                for f in asyncio.as_completed(pdf_tasks):
-                    result = await f
-                    index, title, success = result
-                    results.append(result)
-                    
-                    if success:
-                        success_count += 1
-                        pbar.set_postfix_str(f"Last: {title[:30]}...")
-                    else:
-                        failed_urls.append((index, title))
-                    
-                    pbar.update(1)
-            return results
-
-        results = await run_pdf_generation()
-        
-        while not page_queue.empty():
-            page = await page_queue.get()
-            await page.close()
+    success_count = sum(1 for _, _, success in results if success)
+    failed_urls = [(index, title) for index, title, success in results if not success]
 
     # Merging phase
     print(f"\n{' Merging Phase ':=^50}")
     print(f"Successfully converted {success_count}/{len(urls)} pages")
     successful = [(i, t) for i, t, success in results if success]
-    
+
     if successful:
         merge_pdfs(successful, args.output, temp_dir)
         print(f"\n{' Final Stats ':=^50}")
@@ -264,9 +266,9 @@ async def main():
         print(f"Final PDF size: {Path(args.output).stat().st_size / 1024:.1f} KB")
     else:
         print("No pages converted successfully!")
-    
+
     # Cleanup
-    for file in temp_dir.glob("*.pdf"): 
+    for file in temp_dir.glob("*.pdf"):
         file.unlink()
     temp_dir.rmdir()
     print(f"\n{' Done! ':=^50}")

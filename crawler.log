@@ -105,3 +105,4 @@ playwright._impl._errors.TargetClosedError: BrowserContext.close: Target page, c
 ERROR:asyncio:Future exception was never retrieved
 future: <Future finished exception=Exception('Connection closed while reading from the driver')>
 Exception: Connection closed while reading from the driver
+ERROR:root:Error retrieving results from batch: Error sending result: '<coroutine object generate_pdf_batch at 0x7cd72cdaadc0>'. Reason: 'TypeError("cannot pickle 'coroutine' object")'
