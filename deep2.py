@@ -51,31 +51,43 @@ class AsyncCrawler:
             if url in self.visited or depth > self.max_depth:
                 return []
             self.visited.add(url)
+            self.progress_bar.update(1)  # Update progress for each visited page
 
         context = await browser.new_context(
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
             java_script_enabled=True,
             bypass_csp=True
         )
-        
+
         page = await context.new_page()
         try:
             await page.goto(url, wait_until='networkidle', timeout=20000)
             await page.wait_for_load_state('networkidle', timeout=10000)
-            
+
             # Get HTML after JavaScript execution
             html = await page.content()
-            
+
             # Extract links concurrently with other processing
             links = await self.extract_links(url, html)
-            
+
             # Schedule new links for crawling
             async with self.lock:
                 new_links = [link for link in links if link not in self.visited]
                 self.to_visit.extend([(link, depth + 1) for link in new_links])
-                self.visited.update(new_links)
+                # self.visited.update(new_links) # Not needed, already added in is_valid_url
             
-            return new_links
+            # Update progress bar postfix
+            self.progress_bar.set_postfix({
+                'depth': depth,
+                'queued': len(self.to_visit),
+                'found': len(self.visited)
+            })
+
+            return [(url, depth)]  # Return visited URL with depth for ordering
+        except Exception as e:
+            logging.error(f"Error crawling {url}: {str(e)}")
+            self.progress_bar.write(f"Error crawling {url}: {str(e)}")
+            return []  # Return empty list on error
         finally:
             await context.close()
             await page.close()
@@ -98,8 +110,8 @@ class AsyncCrawler:
                 ]
             )
 
-            with tqdm(desc=f"Crawling {self.root_url}", unit="page", 
-                     bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]") as pbar:
+            with tqdm(desc=f"Crawling {self.root_url}", unit="page",
+                      bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]") as pbar:
                 self.progress_bar = pbar
 
                 while self.to_visit:
@@ -115,19 +127,14 @@ class AsyncCrawler:
                             tasks.append(task)
 
                     for task in asyncio.as_completed(tasks):
-                        new_links = await task
-                        ordered_urls.extend(new_links)
-                        pbar.total = len(self.visited) + len(self.to_visit)
-                        pbar.update(len(new_links))
-                        pbar.set_postfix({
-                            'depth': current_batch[0][1],
-                            'queued': len(self.to_visit),
-                            'found': len(self.visited)
-                        })
+                        visited_pages = await task  # Get visited pages with depth
+                        ordered_urls.extend(visited_pages)
 
             await browser.close()
-        
-        return ordered_urls
+
+        # Sort visited URLs based on depth and order of discovery
+        ordered_urls.sort()
+        return [url for url, _ in ordered_urls]
 
 async def generate_pdf_async(task: Tuple[int, str, Path]) -> Tuple[int, str, bool]:
     index, url, temp_dir = task
@@ -183,27 +190,21 @@ def merge_pdfs(pdf_files: List[Tuple[int, str]], output_path: str, temp_dir: Pat
     
     pdf_files.sort(key=lambda x: x[0])
     
-    # PDF Generation phase
-    tasks = [(i, url, temp_dir) for i, url in enumerate(urls, 1)]
-    success_count = 0
-    failed_urls = []
-
-    with multiprocessing.Pool(processes=args.workers) as pool:
-        with tqdm(total=len(tasks), desc="Generating PDFs", unit="page",
-                bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{percentage:.0f}%] {postfix}",
-                mininterval=0.5) as pbar:
-            results = []
-            for result in pool.imap(pdf_worker_wrapper, tasks, chunksize=4):
-                index, title, success = result
-                results.append(result)
-                
-                if success:
-                    success_count += 1
-                    pbar.set_postfix_str(f"Last: {title[:30]}...")
-                else:
-                    failed_urls.append((index, title))
-                
-                pbar.update(1)
+    with tqdm(total=len(pdf_files), desc="Merging PDFs", unit="page",
+             bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{percentage:.0f}%] {postfix}",
+             mininterval=0.5) as pbar: # corrected format and total
+        for index, title in pdf_files:
+            pdf_path = temp_dir / f"page_{index:04d}.pdf"
+            if not pdf_path.exists():
+                continue
+            
+            with fitz.open(pdf_path) as doc:
+                merged.insert_pdf(doc)
+                toc.append([1, title, merged.page_count - doc.page_count + 1]) # corrected page number
+            
+            pdf_path.unlink()
+            pbar.set_postfix({'current': title[:20] + '...'})
+            pbar.update(1) # update progress
 
     merged.set_toc(toc)
     merged.save(output_path, deflate=True, garbage=4)
@@ -245,10 +246,10 @@ async def main_async():
     
     with multiprocessing.Pool(processes=args.workers) as pool:
         with tqdm(total=len(tasks), desc="Generating PDFs", unit="page",
-                 bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{percent:.0%}] {postfix}",
+                 bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{percentage:.0f}%] {postfix}",
                  mininterval=0.5) as pbar:
             results = []
-            for result in pool.imap(pdf_worker_wrapper, tasks, chunksize=4):
+            for result in pool.imap_unordered(pdf_worker_wrapper, tasks, chunksize=4): # use imap_unordered and chunksize
                 index, title, success = result
                 results.append(result)
                 
@@ -276,6 +277,8 @@ async def main_async():
         print("No pages converted successfully!")
     
     # Cleanup
+    for file in temp_dir.glob("*.pdf"): # remove each file before removing directory
+        file.unlink()
     temp_dir.rmdir()
     print(f"\n{' Done! ':=^50}")
     print(f"Output saved to: {args.output}\n")
