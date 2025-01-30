@@ -74,8 +74,9 @@ class Crawler:
                     if depth < self.max_depth:
                         links = self.extract_links(url, html)
                         for link in links:
-                            self.visited.add(link)
-                            self.to_visit.append((link, depth + 1))
+                            if link not in self.visited:  # prevent duplicates in to_visit
+                                self.visited.add(link)
+                                self.to_visit.append((link, depth + 1))
                     
                     # Update progress bar
                     pbar.total = len(self.visited) + len(self.to_visit)
@@ -106,7 +107,10 @@ def generate_pdf(task: Tuple[int, str, Path]) -> Tuple[int, str, bool]:
             
             page.goto(url, timeout=60000)
             page.wait_for_selector('body', timeout=30000)
-            page.wait_for_selector('main', timeout=5000)
+            try:
+                page.wait_for_selector('main', timeout=5000)
+            except:
+                pass
             
             title = page.title()
             page.emulate_media(media='print')
@@ -131,20 +135,21 @@ def merge_pdfs(pdf_files: List[Tuple[int, str]], output_path: str, temp_dir: Pat
     
     pdf_files.sort(key=lambda x: x[0])
     
-    with tqdm(total=len(tasks), desc="Generating PDFs", unit="page",
+    with tqdm(total=len(pdf_files), desc="Merging PDFs", unit="page",
          bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{percentage:.0f}%] {postfix}",
-         mininterval=0.5) as pbar:
-        for index, title in pbar:
+         mininterval=0.5) as pbar: # change total from tasks to pdf_files
+        for index, title in pdf_files:
             pdf_path = temp_dir / f"page_{index:04d}.pdf"
             if not pdf_path.exists():
                 continue
             
             with fitz.open(pdf_path) as doc:
                 merged.insert_pdf(doc)
-                toc.append([1, title, merged.page_count - doc.page_count])
+                toc.append([1, title, merged.page_count - doc.page_count + 1]) # corrected page number
             
             pdf_path.unlink()
             pbar.set_postfix({'current': title[:20] + '...'})
+            pbar.update(1)
 
     merged.set_toc(toc)
     merged.save(output_path, deflate=True, garbage=4)
@@ -186,9 +191,9 @@ def main():
     
     with multiprocessing.Pool(processes=args.workers) as pool:
         with tqdm(total=len(tasks), desc="Generating PDFs", unit="page",
-                 bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{percent:.0%}] {postfix}") as pbar:
+                  bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{percentage:.0f}%] {postfix}") as pbar: # corrected bar_format
             results = []
-            for result in pool.imap(generate_pdf, tasks):
+            for result in pool.imap_unordered(generate_pdf, tasks): # changed imap to imap_unordered
                 index, title, success = result
                 results.append(result)
                 
@@ -216,6 +221,8 @@ def main():
         print("No pages converted successfully!")
     
     # Cleanup
+    for file in temp_dir.glob("*.pdf"): # remove each file before removing directory
+        file.unlink()
     temp_dir.rmdir()
     print(f"\n{' Done! ':=^50}")
     print(f"Output saved to: {args.output}\n")
