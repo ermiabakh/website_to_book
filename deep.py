@@ -131,19 +131,27 @@ def merge_pdfs(pdf_files: List[Tuple[int, str]], output_path: str, temp_dir: Pat
     
     pdf_files.sort(key=lambda x: x[0])
     
-    with tqdm(pdf_files, desc="Merging PDFs", unit="page", 
-             bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]") as pbar:
-        for index, title in pbar:
-            pdf_path = temp_dir / f"page_{index:04d}.pdf"
-            if not pdf_path.exists():
-                continue
-            
-            with fitz.open(pdf_path) as doc:
-                merged.insert_pdf(doc)
-                toc.append([1, title, merged.page_count - doc.page_count])
-            
-            pdf_path.unlink()
-            pbar.set_postfix({'current': title[:20] + '...'})
+    # PDF Generation phase
+    tasks = [(i, url, temp_dir) for i, url in enumerate(urls, 1)]
+    success_count = 0
+    failed_urls = []
+
+    with multiprocessing.Pool(processes=args.workers) as pool:
+        with tqdm(total=len(tasks), desc="Generating PDFs", unit="page",
+                bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{percentage:.0f}%] {postfix}",
+                mininterval=0.5) as pbar:
+            results = []
+            for result in pool.imap(pdf_worker_wrapper, tasks, chunksize=4):
+                index, title, success = result
+                results.append(result)
+                
+                if success:
+                    success_count += 1
+                    pbar.set_postfix_str(f"Last: {title[:30]}...")
+                else:
+                    failed_urls.append((index, title))
+                
+                pbar.update(1)
 
     merged.set_toc(toc)
     merged.save(output_path, deflate=True, garbage=4)
