@@ -42,3 +42,66 @@ Browser logs:
 <launching> /home/salman/.cache/ms-playwright/chromium_headless_shell-1148/chrome-linux/headless_shell --disable-field-trial-config --disable-background-networking --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-back-forward-cache --disable-breakpad --disable-client-side-phishing-detection --disable-component-extensions-with-background-pages --disable-component-update --no-default-browser-check --disable-default-apps --disable-dev-shm-usage --disable-extensions --disable-features=ImprovedCookieControls,LazyFrameLoading,GlobalMediaControls,DestroyProfileOnBrowserClose,MediaRouter,DialMediaRouteProvider,AcceptCHFrame,AutoExpandDetailsElement,CertificateTransparencyComponentUpdater,AvoidUnnecessaryBeforeUnloadCheckSync,Translate,HttpsUpgrades,PaintHolding,ThirdPartyStoragePartitioning,LensOverlay,PlzDedicatedWorker --allow-pre-commit-input --disable-hang-monitor --disable-ipc-flooding-protection --disable-popup-blocking --disable-prompt-on-repost --disable-renderer-backgrounding --force-color-profile=srgb --metrics-recording-only --no-first-run --enable-automation --password-store=basic --use-mock-keychain --no-service-autorun --export-tagged-pdf --disable-search-engine-choice-screen --unsafely-disable-devtools-self-xss-warnings --headless --hide-scrollbars --mute-audio --blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4 --no-sandbox --disable-gpu --single-process --no-zygote --no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage --user-data-dir=/tmp/playwright_chromiumdev_profile-IdMath --remote-debugging-pipe --no-startup-window
 <launched> pid=84734
 [pid=84734][err] [0130/191453.705565:WARNING:viz_main_impl.cc(85)] VizNullHypothesis is disabled (not a warning)
+ERROR:root:Error crawling https://webscraper.io/test-sites/tables/tables-semantically-correct (attempt 1/2): BrowserContext.new_page: Target page, context or browser has been closed
+Browser logs:
+
+<launching> /home/salman/.cache/ms-playwright/chromium_headless_shell-1148/chrome-linux/headless_shell --disable-field-trial-config --disable-background-networking --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-back-forward-cache --disable-breakpad --disable-client-side-phishing-detection --disable-component-extensions-with-background-pages --disable-component-update --no-default-browser-check --disable-default-apps --disable-dev-shm-usage --disable-extensions --disable-features=ImprovedCookieControls,LazyFrameLoading,GlobalMediaControls,DestroyProfileOnBrowserClose,MediaRouter,DialMediaRouteProvider,AcceptCHFrame,AutoExpandDetailsElement,CertificateTransparencyComponentUpdater,AvoidUnnecessaryBeforeUnloadCheckSync,Translate,HttpsUpgrades,PaintHolding,ThirdPartyStoragePartitioning,LensOverlay,PlzDedicatedWorker --allow-pre-commit-input --disable-hang-monitor --disable-ipc-flooding-protection --disable-popup-blocking --disable-prompt-on-repost --disable-renderer-backgrounding --force-color-profile=srgb --metrics-recording-only --no-first-run --enable-automation --password-store=basic --use-mock-keychain --no-service-autorun --export-tagged-pdf --disable-search-engine-choice-screen --unsafely-disable-devtools-self-xss-warnings --headless --hide-scrollbars --mute-audio --blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4 --no-sandbox --disable-gpu --single-process --no-zygote --no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage --user-data-dir=/tmp/playwright_chromiumdev_profile-i4XG7s --remote-debugging-pipe --no-startup-window
+<launched> pid=87909
+[pid=87909][err] [0130/192240.176532:WARNING:viz_main_impl.cc(85)] VizNullHypothesis is disabled (not a warning)
+ERROR:root:Error crawling https://webscraper.io/test-sites/tables/tables-without-thead (attempt 1/2): BrowserContext.new_page: Target page, context or browser has been closed
+Browser logs:
+
+<launching> /home/salman/.cache/ms-playwright/chromium_headless_shell-1148/chrome-linux/headless_shell --disable-field-trial-config --disable-background-networking --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-back-forward-cache --disable-breakpad --disable-client-side-phishing-detection --disable-component-extensions-with-background-pages --disable-component-update --no-default-browser-check --disable-default-apps --disable-dev-shm-usage --disable-extensions --disable-features=ImprovedCookieControls,LazyFrameLoading,GlobalMediaControls,DestroyProfileOnBrowserClose,MediaRouter,DialMediaRouteProvider,AcceptCHFrame,AutoExpandDetailsElement,CertificateTransparencyComponentUpdater,AvoidUnnecessaryBeforeUnloadCheckSync,Translate,HttpsUpgrades,PaintHolding,ThirdPartyStoragePartitioning,LensOverlay,PlzDedicatedWorker --allow-pre-commit-input --disable-hang-monitor --disable-ipc-flooding-protection --disable-popup-blocking --disable-prompt-on-repost --disable-renderer-backgrounding --force-color-profile=srgb --metrics-recording-only --no-first-run --enable-automation --password-store=basic --use-mock-keychain --no-service-autorun --export-tagged-pdf --disable-search-engine-choice-screen --unsafely-disable-devtools-self-xss-warnings --headless --hide-scrollbars --mute-audio --blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4 --no-sandbox --disable-gpu --single-process --no-zygote --no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage --user-data-dir=/tmp/playwright_chromiumdev_profile-i4XG7s --remote-debugging-pipe --no-startup-window
+<launched> pid=87909
+[pid=87909][err] [0130/192240.176532:WARNING:viz_main_impl.cc(85)] VizNullHypothesis is disabled (not a warning)
+ERROR:root:Error crawling https://webscraper.io/test-sites/tables/tables-multiple-header-rows (attempt 1/2): BrowserContext.new_page: Target page, context or browser has been closed
+Browser logs:
+
+<launching> /home/salman/.cache/ms-playwright/chromium_headless_shell-1148/chrome-linux/headless_shell --disable-field-trial-config --disable-background-networking --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-back-forward-cache --disable-breakpad --disable-client-side-phishing-detection --disable-component-extensions-with-background-pages --disable-component-update --no-default-browser-check --disable-default-apps --disable-dev-shm-usage --disable-extensions --disable-features=ImprovedCookieControls,LazyFrameLoading,GlobalMediaControls,DestroyProfileOnBrowserClose,MediaRouter,DialMediaRouteProvider,AcceptCHFrame,AutoExpandDetailsElement,CertificateTransparencyComponentUpdater,AvoidUnnecessaryBeforeUnloadCheckSync,Translate,HttpsUpgrades,PaintHolding,ThirdPartyStoragePartitioning,LensOverlay,PlzDedicatedWorker --allow-pre-commit-input --disable-hang-monitor --disable-ipc-flooding-protection --disable-popup-blocking --disable-prompt-on-repost --disable-renderer-backgrounding --force-color-profile=srgb --metrics-recording-only --no-first-run --enable-automation --password-store=basic --use-mock-keychain --no-service-autorun --export-tagged-pdf --disable-search-engine-choice-screen --unsafely-disable-devtools-self-xss-warnings --headless --hide-scrollbars --mute-audio --blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4 --no-sandbox --disable-gpu --single-process --no-zygote --no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage --user-data-dir=/tmp/playwright_chromiumdev_profile-i4XG7s --remote-debugging-pipe --no-startup-window
+<launched> pid=87909
+[pid=87909][err] [0130/192240.176532:WARNING:viz_main_impl.cc(85)] VizNullHypothesis is disabled (not a warning)
+ERROR:asyncio:unhandled exception during asyncio.run() shutdown
+task: <Task finished name='Task-8' coro=<AsyncCrawler.crawl_page() done, defined at /home/salman/Projects/python/website_to_book/deep2.py:52> exception=TargetClosedError('BrowserContext.close: Target page, context or browser has been closed')>
+Traceback (most recent call last):
+  File "/home/salman/Projects/python/website_to_book/deep2.py", line 105, in crawl_page
+    await context.close()
+  File "/home/salman/Projects/python/website_to_book/venv/lib/python3.10/site-packages/playwright/async_api/_generated.py", line 13423, in close
+    return mapping.from_maybe_impl(await self._impl_obj.close(reason=reason))
+  File "/home/salman/Projects/python/website_to_book/venv/lib/python3.10/site-packages/playwright/_impl/_browser_context.py", line 599, in close
+    await self._channel.send("close", {"reason": reason})
+  File "/home/salman/Projects/python/website_to_book/venv/lib/python3.10/site-packages/playwright/_impl/_connection.py", line 61, in send
+    return await self._connection.wrap_api_call(
+  File "/home/salman/Projects/python/website_to_book/venv/lib/python3.10/site-packages/playwright/_impl/_connection.py", line 528, in wrap_api_call
+    raise rewrite_error(error, f"{parsed_st['apiName']}: {error}") from None
+playwright._impl._errors.TargetClosedError: BrowserContext.close: Target page, context or browser has been closed
+ERROR:asyncio:unhandled exception during asyncio.run() shutdown
+task: <Task finished name='Task-6' coro=<AsyncCrawler.crawl_page() done, defined at /home/salman/Projects/python/website_to_book/deep2.py:52> exception=TargetClosedError('BrowserContext.close: Target page, context or browser has been closed')>
+Traceback (most recent call last):
+  File "/home/salman/Projects/python/website_to_book/deep2.py", line 105, in crawl_page
+    await context.close()
+  File "/home/salman/Projects/python/website_to_book/venv/lib/python3.10/site-packages/playwright/async_api/_generated.py", line 13423, in close
+    return mapping.from_maybe_impl(await self._impl_obj.close(reason=reason))
+  File "/home/salman/Projects/python/website_to_book/venv/lib/python3.10/site-packages/playwright/_impl/_browser_context.py", line 599, in close
+    await self._channel.send("close", {"reason": reason})
+  File "/home/salman/Projects/python/website_to_book/venv/lib/python3.10/site-packages/playwright/_impl/_connection.py", line 61, in send
+    return await self._connection.wrap_api_call(
+  File "/home/salman/Projects/python/website_to_book/venv/lib/python3.10/site-packages/playwright/_impl/_connection.py", line 528, in wrap_api_call
+    raise rewrite_error(error, f"{parsed_st['apiName']}: {error}") from None
+playwright._impl._errors.TargetClosedError: BrowserContext.close: Target page, context or browser has been closed
+ERROR:asyncio:unhandled exception during asyncio.run() shutdown
+task: <Task finished name='Task-7' coro=<AsyncCrawler.crawl_page() done, defined at /home/salman/Projects/python/website_to_book/deep2.py:52> exception=TargetClosedError('BrowserContext.close: Target page, context or browser has been closed')>
+Traceback (most recent call last):
+  File "/home/salman/Projects/python/website_to_book/deep2.py", line 105, in crawl_page
+    await context.close()
+  File "/home/salman/Projects/python/website_to_book/venv/lib/python3.10/site-packages/playwright/async_api/_generated.py", line 13423, in close
+    return mapping.from_maybe_impl(await self._impl_obj.close(reason=reason))
+  File "/home/salman/Projects/python/website_to_book/venv/lib/python3.10/site-packages/playwright/_impl/_browser_context.py", line 599, in close
+    await self._channel.send("close", {"reason": reason})
+  File "/home/salman/Projects/python/website_to_book/venv/lib/python3.10/site-packages/playwright/_impl/_connection.py", line 61, in send
+    return await self._connection.wrap_api_call(
+  File "/home/salman/Projects/python/website_to_book/venv/lib/python3.10/site-packages/playwright/_impl/_connection.py", line 528, in wrap_api_call
+    raise rewrite_error(error, f"{parsed_st['apiName']}: {error}") from None
+playwright._impl._errors.TargetClosedError: BrowserContext.close: Target page, context or browser has been closed
+ERROR:asyncio:Future exception was never retrieved
+future: <Future finished exception=Exception('Connection closed while reading from the driver')>
+Exception: Connection closed while reading from the driver
