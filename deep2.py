@@ -16,7 +16,7 @@ from tqdm import tqdm
 logging.basicConfig(filename='crawler.log', level=logging.ERROR)
 
 class AsyncCrawler:
-    def __init__(self, root_url: str, max_depth: int = 3):
+    def __init__(self, root_url: str, max_depth: int = 3, retry_count: int = 2, retry_delay: int = 5):
         self.root_url = root_url
         self.max_depth = max_depth
         self.visited = set()
@@ -25,6 +25,8 @@ class AsyncCrawler:
         self.base_path = urlparse(root_url).path.rstrip('/')
         self.progress_bar = None
         self.lock = asyncio.Lock()
+        self.retry_count = retry_count
+        self.retry_delay = retry_delay
 
     def is_valid_url(self, url: str) -> bool:
         parsed = urlparse(url)
@@ -34,15 +36,16 @@ class AsyncCrawler:
             return False
         if parsed.fragment:
             return False
-        return url not in self.visited
+        async with self.lock:
+            return url not in self.visited
 
     async def extract_links(self, url: str, html: str) -> List[str]:
-        soup = BeautifulSoup(html, 'lxml')  # Faster parser
+        soup = BeautifulSoup(html, 'lxml')
         links = []
         for a in soup.find_all('a', href=True):
             href = a['href']
             full_url = urljoin(url, href).split('#')[0]
-            if self.is_valid_url(full_url):
+            if await self.is_valid_url(full_url):
                 links.append(full_url)
         return links
 
@@ -50,47 +53,53 @@ class AsyncCrawler:
         async with self.lock:
             if url in self.visited or depth > self.max_depth:
                 return []
-            self.visited.add(url)
-            self.progress_bar.update(1)  # Update progress for each visited page
+            # Don't add to visited yet, only after successful processing
 
-        context = await browser.new_context(
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            java_script_enabled=True,
-            bypass_csp=True
-        )
+        retries = 0
+        while retries < self.retry_count:
+            context = await browser.new_context(
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                java_script_enabled=True,
+                bypass_csp=True
+            )
+            page = await context.new_page()
+            try:
+                await page.goto(url, wait_until='networkidle', timeout=60000)
+                await page.wait_for_load_state('networkidle', timeout=30000)
 
-        page = await context.new_page()
-        try:
-            await page.goto(url, wait_until='networkidle', timeout=20000)
-            await page.wait_for_load_state('networkidle', timeout=10000)
+                # Get HTML after JavaScript execution
+                html = await page.content()
 
-            # Get HTML after JavaScript execution
-            html = await page.content()
+                # Extract links
+                links = await self.extract_links(url, html)
 
-            # Extract links concurrently with other processing
-            links = await self.extract_links(url, html)
+                async with self.lock:
+                    self.visited.add(url)
+                    self.progress_bar.update(1)
+                    new_links = [link for link in links if link not in self.visited]
+                    self.to_visit.extend([(link, depth + 1) for link in new_links])
 
-            # Schedule new links for crawling
-            async with self.lock:
-                new_links = [link for link in links if link not in self.visited]
-                self.to_visit.extend([(link, depth + 1) for link in new_links])
-                # self.visited.update(new_links) # Not needed, already added in is_valid_url
-            
-            # Update progress bar postfix
-            self.progress_bar.set_postfix({
-                'depth': depth,
-                'queued': len(self.to_visit),
-                'found': len(self.visited)
-            })
+                # Update progress bar postfix
+                self.progress_bar.set_postfix({
+                    'depth': depth,
+                    'queued': len(self.to_visit),
+                    'found': len(self.visited)
+                })
 
-            return [(url, depth)]  # Return visited URL with depth for ordering
-        except Exception as e:
-            logging.error(f"Error crawling {url}: {str(e)}")
-            self.progress_bar.write(f"Error crawling {url}: {str(e)}")
-            return []  # Return empty list on error
-        finally:
-            await context.close()
-            await page.close()
+                return [(url, depth)]  # Return visited URL with depth for ordering
+
+            except Exception as e:
+                retries += 1
+                error_msg = f"Error crawling {url} (attempt {retries}/{self.retry_count}): {str(e)}"
+                logging.error(error_msg)
+                self.progress_bar.write(error_msg)
+                if retries < self.retry_count:
+                    await asyncio.sleep(self.retry_delay)
+                else:
+                    return [] # Return empty after max retries
+            finally:
+                await context.close()
+                await page.close()
 
     async def crawl(self):
         self.to_visit = [(self.root_url, 0)]
@@ -116,8 +125,10 @@ class AsyncCrawler:
 
                 while self.to_visit:
                     tasks = []
-                    current_batch = self.to_visit.copy()
-                    self.to_visit.clear()
+                    current_batch = []
+                    async with self.lock:
+                        current_batch = self.to_visit.copy()
+                        self.to_visit.clear()
 
                     for url, depth in current_batch:
                         async with sem:
@@ -149,6 +160,7 @@ async def generate_pdf_async(task: Tuple[int, str, Path]) -> Tuple[int, str, boo
                     '--single-process',
                     '--no-zygote',
                     '--no-sandbox',
+                    '--disable-setuid-sandbox',
                     '--disable-dev-shm-usage'
                 ]
             )
