@@ -132,7 +132,8 @@ def merge_pdfs(pdf_files: List[Tuple[int, str]], output_path: str, temp_dir: Pat
     pdf_files.sort(key=lambda x: x[0])
     
     with tqdm(total=len(tasks), desc="Generating PDFs", unit="page",
-         bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{percentage:.0f}%] {postfix}") as pbar:
+         bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{percentage:.0f}%] {postfix}",
+         mininterval=0.5) as pbar:
         for index, title in pbar:
             pdf_path = temp_dir / f"page_{index:04d}.pdf"
             if not pdf_path.exists():
