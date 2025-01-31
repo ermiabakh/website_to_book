@@ -1,19 +1,72 @@
 import argparse
 import asyncio
+import json
 import logging
 import multiprocessing
 import re
 import time
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Any
 from urllib.parse import urljoin, urlparse
+import os
 
-import fitz
+import pymupdf
 from bs4 import BeautifulSoup
+from quart import Quart, request, render_template, Response, send_file
+from quart.helpers import stream_with_context
 from playwright.async_api import async_playwright
 from tqdm import tqdm
+from werkzeug.utils import secure_filename
 
 logging.basicConfig(filename='crawler.log', level=logging.ERROR)
+app = Quart(__name__)
+app.config['TEMPLATES_AUTO_RELOAD'] = True
+
+# Ensure output directory exists
+OUTPUT_DIR = 'output'
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Global state for progress tracking
+current_process = {
+    'active': False,
+    'progress': None,
+    'messages': asyncio.Queue(),
+    'output_file': None,
+    'output_filename': None  # Store the desired filename
+}
+
+class TqdmToQueue(tqdm):
+    def __init__(self, *args, **kwargs):
+        # Initialize queue FIRST before super().__init__
+        self.queue = current_process['messages']
+        # Initialize parent
+        super().__init__(*args, **kwargs)
+
+
+        # Set required attributes that parent __del__ might need
+        if not hasattr(self, 'last_print_t'):
+            self.last_print_t = self.start_t - self.delay
+
+
+    def display(self, msg=None, pos=None):
+        # Call parent display first
+        super().display(msg, pos)
+
+        # Send update to queue
+        asyncio.run_coroutine_threadsafe(
+            self.queue.put({
+                'type': 'progress',
+                'current': self.n,
+                'total': self.total,
+                'message': self.desc
+            }),
+            loop=asyncio.get_event_loop()
+        )
+
+    def close(self):
+        # Ensure parent cleanup happens properly
+        if hasattr(self, 'last_print_t'):
+            super().close()
 
 class Crawler:
     def __init__(self, root_url: str, max_depth: int = 3):
@@ -22,8 +75,6 @@ class Crawler:
         self.visited = set()
         self.to_visit = []
         self.base_domain = urlparse(root_url).netloc
-        self.progress_bar = None
-        # Mark root as visited immediately
         self.visited.add(root_url)
         self.to_visit.append((root_url, 0))
 
@@ -53,12 +104,11 @@ class Crawler:
             page_pool = [await context.new_page() for _ in range(multiprocessing.cpu_count() * 2)]
 
             tasks = set()
-            with tqdm(desc=f"Crawling {self.root_url}", unit="page",
+            with TqdmToQueue(desc=f"Crawling {self.root_url}", unit="page",
                       dynamic_ncols=True, bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]") as pbar:
                 self.progress_bar = pbar
 
                 while self.to_visit or tasks:
-                    # Schedule new tasks
                     while self.to_visit and len(tasks) < len(page_pool):
                         url, depth = self.to_visit.pop(0)
                         if depth > self.max_depth:
@@ -68,7 +118,6 @@ class Crawler:
                         tasks.add(task)
                         task.add_done_callback(lambda t, p=page: (tasks.remove(t), page_pool.append(p)))
 
-                    # Process completed tasks
                     if tasks:
                         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
                         for task in done:
@@ -99,7 +148,6 @@ class Crawler:
 
     async def crawl_page(self, url: str, depth: int, page):
         try:
-            # Wait for network idle to capture dynamic content
             await page.goto(url, timeout=120000, wait_until='networkidle')
             await page.wait_for_selector('body', timeout=30000)
             html = await page.content()
@@ -121,11 +169,9 @@ async def generate_pdf(task: Tuple[int, str, Path, asyncio.Queue]) -> Tuple[int,
 
     try:
         page = await page_queue.get()
-        # Wait for network idle before generating PDF
         await page.goto(url, timeout=120000, wait_until='networkidle')
         await page.wait_for_selector('body', timeout=30000)
-        
-        # Try to wait for main content
+
         try:
             await page.wait_for_selector('main', timeout=5000)
         except:
@@ -148,30 +194,26 @@ async def generate_pdf(task: Tuple[int, str, Path, asyncio.Queue]) -> Tuple[int,
         logging.error(f"Error generating PDF for {url}: {str(e)}")
         return (index, "", False)
 
-# Rest of the code remains the same as original for merge_pdfs and main function
-
 def merge_pdfs(pdf_files: List[Tuple[int, str]], output_path: str, temp_dir: Path):
     num_processes = multiprocessing.cpu_count()
     chunk_size = len(pdf_files) // num_processes + 1
     chunks = [pdf_files[i:i + chunk_size] for i in range(0, len(pdf_files), chunk_size)]
 
     with multiprocessing.Pool(processes=num_processes) as pool:
-        with tqdm(total=len(chunks), desc="Merging PDF chunks", unit="chunk",
-                  bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{percentage:.0f}%] {postfix}") as pbar:
+        with tqdm(total=len(chunks), desc="Merging PDF chunks", unit="chunk") as pbar:
             results = []
             for i, result in enumerate(pool.imap_unordered(merge_chunk, [(chunk, temp_dir, i) for i, chunk in enumerate(chunks)])):
                 results.append(result)
                 pbar.update()
 
-    results.sort()  # Sort by chunk index
+    results.sort()
 
-    merged = fitz.open()
+    merged = pymupdf.open()
     toc = []
-    
-    with tqdm(total=len(results), desc="Merging Chunks to Final PDF", unit="chunk",
-              bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{percentage:.0f}%] {postfix}") as pbar:
+
+    with tqdm(total=len(results), desc="Merging Chunks to Final PDF", unit="chunk") as pbar:
         for i, (chunk_toc, chunk_path) in enumerate(results):
-            with fitz.open(chunk_path) as doc:
+            with pymupdf.open(chunk_path) as doc:
                 merged.insert_pdf(doc)
                 for lvl, title, page in chunk_toc:
                     toc.append([lvl, title, page + merged.page_count - doc.page_count])
@@ -186,7 +228,7 @@ def merge_chunk(args):
     chunk, temp_dir, chunk_index = args
     chunk_output_path = temp_dir / f"chunk_{chunk_index:04d}.pdf"
 
-    merged_chunk = fitz.open()
+    merged_chunk = pymupdf.open()
     chunk_toc = []
 
     for index, title in chunk:
@@ -194,7 +236,7 @@ def merge_chunk(args):
         if not pdf_path.exists():
             continue
 
-        with fitz.open(pdf_path) as doc:
+        with pymupdf.open(pdf_path) as doc:
             merged_chunk.insert_pdf(doc)
             chunk_toc.append([1, title, merged_chunk.page_count - doc.page_count + 1])
 
@@ -206,102 +248,141 @@ def merge_chunk(args):
 
     return chunk_toc, str(chunk_output_path)
 
-async def main():
-    parser = argparse.ArgumentParser(description='Website to PDF Book Converter')
-    parser.add_argument('url', help='Root URL to start crawling')
-    parser.add_argument('output', help='Output PDF filename')
-    parser.add_argument('--max-depth', type=int, default=5, 
-                       help='Maximum crawl depth (default: 5)')
-    parser.add_argument('--workers', type=int, default=4,
-                       help='Number of parallel workers (default: 4)')
-    parser.add_argument('--temp-dir', default='temp_pages',
-                       help='Temporary directory for PDFs (default: temp_pages)')
-    
-    args = parser.parse_args()
-    
-    temp_dir = Path(args.temp_dir)
+async def run_conversion(url: str, max_depth: int, workers: int, output_path: str):
+    temp_dir = Path('temp_pages')
     temp_dir.mkdir(exist_ok=True)
-    
-    print(f"\n{' Starting PDF Generator ':=^50}")
-    print(f"Root URL: {args.url}")
-    print(f"Max Depth: {args.max_depth}")
-    print(f"Workers: {args.workers}\n")
-    
-    # Crawling phase
-    crawler = Crawler(args.url, args.max_depth)
-    urls = await crawler.crawl()
-    
-    print(f"\n{' Conversion Phase ':=^50}")
-    print(f"Total unique pages found: {len(urls)}")
-    print(f"Starting PDF generation with {args.workers} workers...\n")
-    
-    # PDF Generation phase
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context()
 
-        page_queue = asyncio.Queue()
-        for _ in range(multiprocessing.cpu_count() * 2):
-            page = await context.new_page()
-            await page_queue.put(page)
+    try:
+        crawler = Crawler(url, max_depth)
+        urls = await crawler.crawl()
 
-        tasks = [(i, url, temp_dir, page_queue) for i, url in enumerate(urls, 1)]
-        success_count = 0
-        failed_urls = []
-    
-        async def run_pdf_generation():
-            nonlocal success_count
-            
-            pdf_tasks = [generate_pdf(task) for task in tasks]
-            
-            with tqdm(total=len(pdf_tasks), desc="Generating PDFs", unit="page",
-                    dynamic_ncols=True, bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{percentage:.0f}%] {postfix}") as pbar:
-                
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context()
+
+            page_queue = asyncio.Queue()
+            for _ in range(multiprocessing.cpu_count() * 2):
+                page = await context.new_page()
+                await page_queue.put(page)
+
+            tasks = [(i, url, temp_dir, page_queue) for i, url in enumerate(urls, 1)]
+            success_count = 0
+            failed_urls = []
+
+            with TqdmToQueue(total=len(tasks), desc="Generating PDFs", unit="page") as pbar:
                 results = []
-                for f in asyncio.as_completed(pdf_tasks):
-                    result = await f
+                for task in asyncio.as_completed([generate_pdf(t) for t in tasks]):
+                    result = await task
                     index, title, success = result
                     results.append(result)
-                    
+
                     if success:
                         success_count += 1
                         pbar.set_postfix_str(f"Last: {title[:30]}...", refresh=False)
                     else:
                         failed_urls.append((index, title))
-                    
+
                     pbar.update(1)
-            return results
 
-        results = await run_pdf_generation()
-        
-        while not page_queue.empty():
-            page = await page_queue.get()
-            await page.close()
+            await browser.close()
 
-        await context.close()
-        await browser.close()
+        successful = [(i, t) for i, t, success in results if success]
+        if successful:
+            merge_pdfs(successful, output_path, temp_dir)
+            current_process['output_file'] = output_path
+        else:
+            raise Exception("No pages converted successfully!")
 
-    # Merging phase
-    print(f"\n{' Merging Phase ':=^50}")
-    print(f"Successfully converted {success_count}/{len(urls)} pages")
-    successful = [(i, t) for i, t, success in results if success]
-    
-    if successful:
-        merge_pdfs(successful, args.output, temp_dir)
-        print(f"\n{' Final Stats ':=^50}")
-        print(f"Total pages crawled: {len(urls)}")
-        print(f"Successfully converted: {success_count}")
-        print(f"Failed conversions: {len(urls) - success_count}")
-        print(f"Final PDF size: {Path(args.output).stat().st_size / 1024:.1f} KB")
-    else:
-        print("No pages converted successfully!")
-    
-    # Cleanup
-    for file in temp_dir.glob("*.pdf"): 
-        file.unlink()
-    temp_dir.rmdir()
-    print(f"\n{' Done! ':=^50}")
-    print(f"Output saved to: {args.output}\n")
+    finally:
+        for file in temp_dir.glob("*.pdf"):
+            file.unlink()
+        temp_dir.rmdir()
+
+@app.route('/')
+async def index():
+    return await render_template('index.html')
+
+@app.route('/convert', methods=['POST'])
+async def convert():
+    if current_process['active']:
+        return {"status": "error", "message": "A process is already running"}, 400
+
+    current_process['active'] = True
+    current_process['output_file'] = None
+    current_process['output_filename'] = None # Reset filename
+
+    # Proper form handling in Quart
+    form_data = await request.form
+    data = form_data.to_dict()
+
+    filename_input = data.get('filename', 'output') # Default filename if not provided
+    filename = secure_filename(filename_input) # Sanitize filename
+    if not filename:
+        filename = 'output' # Fallback if sanitization results in empty string
+    output_filename = f"{filename}.pdf"
+    output_path = os.path.join(OUTPUT_DIR, output_filename) # Save to output directory
+
+    current_process['output_filename'] = output_filename # Store for download route
+    current_process['output_file'] = output_path # Store full output path
+
+    async def run():
+        try:
+            await run_conversion(
+                url=data['url'],
+                max_depth=int(data['depth']),
+                workers=int(data['workers']),
+                output_path=output_path
+            )
+            await current_process['messages'].put({'type': 'complete'})
+        except Exception as e:
+            await current_process['messages'].put({'type': 'error', 'message': str(e)})
+        finally:
+            current_process['active'] = False
+
+    asyncio.create_task(run())
+    return {"status": "started"}
+
+@app.route('/progress')
+async def progress():
+    @stream_with_context
+    async def generate():
+        try:  # Add try-except block
+            while True:
+                try:
+                    message = await asyncio.wait_for(
+                        current_process['messages'].get(),
+                        timeout=0.5
+                    )
+
+                    if message['type'] == 'progress':
+                        yield f"data: {json.dumps(message)}\n\n"
+                    elif message['type'] == 'complete':
+                        yield f"data: {json.dumps({'type': 'complete'})}\n\n"
+                        break
+                    elif message['type'] == 'error':
+                        yield f"data: {json.dumps(message)}\n\n"
+                        break
+                except asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"
+                    continue
+        except Exception as e: # Catch any errors in the generator
+            logging.error(f"Error in /progress SSE stream: {e}") # Log the error
+            yield f"data: {json.dumps({'type': 'error', 'message': 'SSE stream error'})}\n\n" # Send error to client
+
+    return Response(generate(), mimetype='text/event-stream')
+
+@app.route('/download')
+async def download():
+    if not current_process['output_file'] or not Path(current_process['output_file']).exists():
+        return {"status": "error", "message": "File not ready"}, 404
+
+    output_filename = current_process.get('output_filename', 'output.pdf') # Get stored filename or default
+    output_file_path = current_process['output_file'] # Full path already stored
+
+    return await send_file(
+        output_file_path,
+        as_attachment=True # Force download, removed filename keyword argument
+    )
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    app.run(port=9999, debug=True)

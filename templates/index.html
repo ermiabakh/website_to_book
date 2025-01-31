@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Website to PDF Converter</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        max-width: 800px;
+        margin: 0 auto;
+        padding: 20px;
+      }
+      .form-group {
+        margin-bottom: 15px;
+      }
+      label {
+        display: block;
+        margin-bottom: 5px;
+      }
+      input,
+      select {
+        width: 100%;
+        padding: 8px;
+        margin-bottom: 10px;
+      }
+      button {
+        padding: 10px 20px;
+        background: #4caf50;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #45a049;
+      }
+      .progress-container {
+        margin-top: 20px;
+        display: none;
+      }
+      .progress-bar {
+        width: 100%;
+        height: 20px;
+        background-color: #f0f0f0;
+        border-radius: 10px;
+        overflow: hidden;
+      }
+      .progress-fill {
+        height: 100%;
+        background-color: #4caf50;
+        transition: width 0.3s ease;
+      }
+      #messages {
+        margin-top: 20px;
+        padding: 10px;
+        background: #f8f8f8;
+        border-radius: 4px;
+        max-height: 200px;
+        overflow-y: auto;
+      }
+      .message {
+        margin: 5px 0;
+        color: #666;
+      }
+      #download-link {
+        display: none;
+        margin-top: 20px;
+      } /* Initially hide download link */
+      #download-link a {
+        display: inline-block;
+        padding: 10px 20px;
+        background: #007bff;
+        color: white;
+        text-decoration: none;
+        border-radius: 4px;
+      }
+      #download-link a:hover {
+        background: #0056b3;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Website to PDF Converter</h1>
+    <form id="conversionForm">
+      <div class="form-group">
+        <label for="url">Website URL:</label>
+        <input
+          type="url"
+          id="url"
+          name="url"
+          required
+          placeholder="https://example.com"
+        />
+      </div>
+
+      <div class="form-group">
+        <label for="depth">Crawl Depth:</label>
+        <select id="depth" name="depth">
+          <option value="2">2</option>
+          <option value="3">3</option>
+          <option value="5" selected>5</option>
+          <option value="10">10</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label for="workers">Workers:</label>
+        <select id="workers" name="workers">
+          <option value="2">2</option>
+          <option value="4" selected>4</option>
+          <option value="8">8</option>
+          <option value="16">16</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label for="filename">PDF Filename:</label>
+        <input
+          type="text"
+          id="filename"
+          name="filename"
+          value="output"
+          placeholder="Enter filename (without .pdf)"
+        />
+      </div>
+
+      <button type="submit">Start Conversion</button>
+    </form>
+
+    <div class="progress-container" style="display: none">
+      <h3>Conversion Progress</h3>
+      <div class="progress-bar">
+        <div class="progress-fill" style="width: 0%"></div>
+      </div>
+      <div id="messages"></div>
+    </div>
+
+    <div id="download-link" style="display: none">
+      <a id="download-anchor" href="#" target="_blank">Download PDF</a>
+    </div>
+
+    <script>
+      const form = document.getElementById("conversionForm");
+      const progressContainer = document.querySelector(".progress-container");
+      const progressFill = document.querySelector(".progress-fill");
+      const messagesDiv = document.getElementById("messages");
+      const downloadLinkDiv = document.getElementById("download-link"); // Get download link div
+
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        progressContainer.style.display = "block";
+        downloadLinkDiv.style.display = "none"; // Hide download link on new conversion
+        messagesDiv.innerHTML = "";
+        progressFill.style.width = "0%"; // Reset progress bar
+
+        const response = await fetch("/convert", {
+          method: "POST",
+          body: new FormData(form),
+        });
+
+        if (!response.ok) {
+          alert("Error starting conversion");
+          progressContainer.style.display = "none"; // Hide progress on error
+          return;
+        }
+
+        const eventSource = new EventSource("/progress");
+        console.log("EventSource created:", eventSource); // Debug: Check if EventSource is created
+
+        // Modify the event handler in the <script> section:
+        eventSource.onmessage = (event) => {
+          if (event.data === ": keep-alive") return;
+
+          try {
+            // Handle potential raw string messages
+            let data;
+            try {
+              data = JSON.parse(event.data);
+            } catch (e) {
+              // If the message isn't JSON, check for special cases
+              if (event.data.trim() === 'data: {"type": "complete"}') {
+                data = { type: "complete" };
+              } else {
+                throw e;
+              }
+            }
+
+            switch (data.type) {
+              case "progress":
+                const percent = ((data.current / data.total) * 100).toFixed(1);
+                progressFill.style.width = `${percent}%`;
+                messagesDiv.innerHTML += `
+                    <div class="message">
+                        ${data.message} - ${percent}%
+                    </div>`;
+                messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                break;
+              case "complete":
+                eventSource.close();
+                progressContainer.style.display = "none";
+                downloadLinkDiv.style.display = "block"; // Show download link
+                // Force refresh the download link
+                document.getElementById(
+                  "download-link"
+                ).innerHTML = `<a href="/download?t=${Date.now()}" target="_blank">Download PDF</a>`;
+                break;
+              case "error":
+                eventSource.close();
+                progressContainer.style.display = "none";
+                alert(`Error: ${data.message}`);
+                break;
+            }
+          } catch (e) {
+            console.error(
+              "Error handling message:",
+              e,
+              "Raw data:",
+              event.data
+            );
+            progressContainer.style.display = "none";
+          }
+        };
+
+        eventSource.onerror = (error) => {
+          console.error("EventSource failed:", error);
+          eventSource.close();
+          progressContainer.style.display = "none"; // Hide progress on event source error
+          alert("Error receiving progress updates.");
+        };
+      });
+    </script>
+  </body>
+</html>
