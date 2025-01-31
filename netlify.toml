@@ -1,14 +1,21 @@
+# netlify.toml
+
 [build]
   functions = "netlify/functions" # Path to your functions directory
   publish = "."               # Publish directory (can be root for this app)
-  command = "pip install -r requirements.txt && playwright install" # Install dependencies during build
+  command = "pip install -r requirements.txt" # Install dependencies during build
 
 [[redirects]]
   from = "/api/*"
-  to = "/.netlify/functions/deep2/:splat" # Route /api/* to your function
+  to = "/.netlify/functions/deep2/:splat" # Route /api/* to your function API endpoints
   status = 200
 
 [[redirects]]
-  from = "/*"
-  to = "/.netlify/functions/deep2" # Route all other requests (for index.html)
+  from = "/"                  # Explicitly route root "/" to your function for index.html
+  to = "/.netlify/functions/deep2"
   status = 200
+
+[[redirects]]
+  from = "/*"                  # Optional: Catch-all for other paths, could be 404 or function
+  to = "/.netlify/functions/deep2"
+  status = 404
