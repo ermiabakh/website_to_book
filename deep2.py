@@ -1,5 +1,3 @@
-# netlify/functions/deep2/deep2.py
-
 import argparse
 import asyncio
 import json
@@ -14,18 +12,19 @@ import os
 
 import pymupdf
 from bs4 import BeautifulSoup
-from quart import Quart, request, render_template, Response, send_file
+from quart import Quart, request, render_template, Response, send_file, jsonify
 from quart.helpers import stream_with_context
 from playwright.async_api import async_playwright
 from tqdm import tqdm
 from werkzeug.utils import secure_filename
+from asgiref.wsgi import WsgiToAsgi
 
-logging.basicConfig(filename='crawler.log', level=logging.ERROR)
+logging.basicConfig(filename='/tmp/crawler.log', level=logging.ERROR)
 app = Quart(__name__)
 app.config['TEMPLATES_AUTO_RELOAD'] = True
 
-# Ensure output directory exists
-OUTPUT_DIR = 'output'
+# Ensure output directory exists in /tmp for Netlify functions
+OUTPUT_DIR = '/tmp/output'
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # Global state for progress tracking
@@ -34,39 +33,30 @@ current_process = {
     'progress': None,
     'messages': asyncio.Queue(),
     'output_file': None,
-    'output_filename': None  # Store the desired filename
+    'output_filename': None,
+    'generated_files': []
 }
 
 class TqdmToQueue(tqdm):
     def __init__(self, *args, **kwargs):
-        # Initialize queue FIRST before super().__init__
         self.queue = current_process['messages']
-        # Initialize parent
         super().__init__(*args, **kwargs)
-
-
-        # Set required attributes that parent __del__ might need
         if not hasattr(self, 'last_print_t'):
             self.last_print_t = self.start_t - self.delay
 
-
     def display(self, msg=None, pos=None):
-        # Call parent display first
         super().display(msg, pos)
-
-        # Send update to queue
         asyncio.run_coroutine_threadsafe(
             self.queue.put({
                 'type': 'progress',
                 'current': self.n,
                 'total': self.total,
-                'message': self.desc
+                'message': msg if msg else self.desc # Send the message directly
             }),
             loop=asyncio.get_event_loop()
         )
 
     def close(self):
-        # Ensure parent cleanup happens properly
         if hasattr(self, 'last_print_t'):
             super().close()
 
@@ -157,12 +147,13 @@ class Crawler:
             links = []
             if depth < self.max_depth:
                 links = self.extract_links(url, html)
-                self.progress_bar.write(f"Found {len(links)} links at depth {depth}")
+                self.progress_bar.write(f"Depth {depth}: Found {len(links)} links") # More informative message
 
             return url, depth, links
         except Exception as e:
-            logging.error(f"Error crawling {url}: {str(e)}")
-            self.progress_bar.write(f"Error crawling {url}: {str(e)}")
+            error_message = f"Error crawling {url}: {str(e)}"
+            logging.error(error_message)
+            self.progress_bar.write(error_message) # Write error message to progress bar
             return None, None, []
 
 async def generate_pdf(task: Tuple[int, str, Path, asyncio.Queue]) -> Tuple[int, str, bool]:
@@ -193,7 +184,9 @@ async def generate_pdf(task: Tuple[int, str, Path, asyncio.Queue]) -> Tuple[int,
         return (index, title, True)
 
     except Exception as e:
-        logging.error(f"Error generating PDF for {url}: {str(e)}")
+        error_message = f"Error generating PDF for {url}: {str(e)}"
+        logging.error(error_message)
+        self.progress_bar.write(error_message) # Write error message to progress bar
         return (index, "", False)
 
 def merge_pdfs(pdf_files: List[Tuple[int, str]], output_path: str, temp_dir: Path):
@@ -251,7 +244,7 @@ def merge_chunk(args):
     return chunk_toc, str(chunk_output_path)
 
 async def run_conversion(url: str, max_depth: int, workers: int, output_path: str):
-    temp_dir = Path('temp_pages')
+    temp_dir = Path('/tmp/temp_pages')
     temp_dir.mkdir(exist_ok=True)
 
     try:
@@ -307,25 +300,25 @@ async def index():
 @app.route('/convert', methods=['POST'])
 async def convert():
     if current_process['active']:
-        return {"status": "error", "message": "A process is already running"}, 400
+        return jsonify({"status": "error", "message": "A process is already running"}), 400
 
     current_process['active'] = True
     current_process['output_file'] = None
-    current_process['output_filename'] = None # Reset filename
+    current_process['output_filename'] = None
+    current_process['generated_files'] = []
 
-    # Proper form handling in Quart
     form_data = await request.form
     data = form_data.to_dict()
 
-    filename_input = data.get('filename', 'output') # Default filename if not provided
-    filename = secure_filename(filename_input) # Sanitize filename
+    filename_input = data.get('filename', 'output')
+    filename = secure_filename(filename_input)
     if not filename:
-        filename = 'output' # Fallback if sanitization results in empty string
+        filename = 'output'
     output_filename = f"{filename}.pdf"
-    output_path = os.path.join(OUTPUT_DIR, output_filename) # Save to output directory
+    output_path = os.path.join(OUTPUT_DIR, output_filename)
 
-    current_process['output_filename'] = output_filename # Store for download route
-    current_process['output_file'] = output_path # Store full output path
+    current_process['output_filename'] = output_filename
+    current_process['output_file'] = output_path
 
     async def run():
         try:
@@ -335,20 +328,30 @@ async def convert():
                 workers=int(data['workers']),
                 output_path=output_path
             )
+
+            if current_process['output_file'] and os.path.exists(current_process['output_file']):
+                current_process['generated_files'] = [{
+                    'filename': current_process['output_filename'],
+                    'download_url': f"/api/download?filename={current_process['output_filename']}"
+                }]
+            else:
+                current_process['generated_files'] = []
+
             await current_process['messages'].put({'type': 'complete'})
+
         except Exception as e:
             await current_process['messages'].put({'type': 'error', 'message': str(e)})
         finally:
             current_process['active'] = False
 
     asyncio.create_task(run())
-    return {"status": "started"}
+    return jsonify({"status": "started"})
 
 @app.route('/progress')
 async def progress():
     @stream_with_context
     async def generate():
-        try:  # Add try-except block
+        try:
             while True:
                 try:
                     message = await asyncio.wait_for(
@@ -359,32 +362,45 @@ async def progress():
                     if message['type'] == 'progress':
                         yield f"data: {json.dumps(message)}\n\n"
                     elif message['type'] == 'complete':
-                        yield f"data: {json.dumps({'type': 'complete'})}\n\n"
+                        yield f"data: {json.dumps({'type': 'complete', 'files': current_process['generated_files']})}\n\n"
                         break
                     elif message['type'] == 'error':
                         yield f"data: {json.dumps(message)}\n\n"
                         break
-                except asyncio.TimeoutError:
-                    yield ": keep-alive\n\n"
-                    continue
-        except Exception as e: # Catch any errors in the generator
-            logging.error(f"Error in /progress SSE stream: {e}") # Log the error
-            yield f"data: {json.dumps({'type': 'error', 'message': 'SSE stream error'})}\n\n" # Send error to client
+                    except asyncio.TimeoutError:
+                        yield ": keep-alive\n\n"
+                        continue
+            except Exception as e:
+                logging.error(f"Error in /progress SSE stream: {e}")
+                yield f"data: {json.dumps({'type': 'error', 'message': 'SSE stream error'})}\n\n"
 
-    return Response(generate(), mimetype='text/event-stream')
+        return Response(generate(), mimetype='text/event-stream')
 
-@app.route('/download')
+@app.route('/files')
+async def list_files():
+    return jsonify({'files': current_process['generated_files']})
+
+@app.route('/api/download')
 async def download():
-    if not current_process['output_file'] or not Path(current_process['output_file']).exists():
-        return {"status": "error", "message": "File not ready"}, 404
+    filename = request.args.get('filename')
+    if not filename:
+        return jsonify({"status": "error", "message": "Filename not provided"}), 400
 
-    output_filename = current_process.get('output_filename', 'output.pdf') # Get stored filename or default
-    output_file_path = current_process['output_file'] # Full path already stored
+    output_file_path = os.path.join(OUTPUT_DIR, filename)
+
+    if not os.path.exists(output_file_path):
+        return jsonify({"status": "error", "message": "File not found"}), 404
 
     return await send_file(
         output_file_path,
-        as_attachment=True # Force download, removed filename keyword argument
+        download_name=filename,
+        as_attachment=True
     )
+
+# Netlify Function Handler
+asgi_app = app
+wsgi_app = WsgiToAsgi(app)
+handler = wsgi_app
 
 if __name__ == "__main__":
     app.run(debug=True)

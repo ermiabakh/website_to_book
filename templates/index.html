@@ -56,10 +56,16 @@
         border-radius: 4px;
         max-height: 200px;
         overflow-y: auto;
+        border: 1px solid #ccc; /* Added border for better visibility */
       }
       .message {
         margin: 5px 0;
         color: #666;
+        word-wrap: break-word; /* Ensure long messages wrap */
+      }
+      .message.error {
+        color: darkred; /* Style for error messages */
+        font-weight: bold;
       }
       #download-link {
         display: none;
@@ -75,6 +81,28 @@
       }
       #download-link a:hover {
         background: #0056b3;
+      }
+
+      #file-table-container {
+        margin-top: 20px;
+        display: none; /* Initially hidden */
+      }
+
+      #file-table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 10px;
+      }
+
+      #file-table th,
+      #file-table td {
+        border: 1px solid #ddd;
+        padding: 8px;
+        text-align: left;
+      }
+
+      #file-table th {
+        background-color: #f0f0f0;
       }
     </style>
   </head>
@@ -138,45 +166,62 @@
       <a id="download-anchor" href="#" target="_blank">Download PDF</a>
     </div>
 
+    <div id="file-table-container" style="display: none">
+      <h3>Generated Files</h3>
+      <table id="file-table">
+        <thead>
+          <tr>
+            <th>Filename</th>
+            <th>Download Link</th>
+          </tr>
+        </thead>
+        <tbody id="file-table-body">
+          <!-- File rows will be added here by JavaScript -->
+        </tbody>
+      </table>
+    </div>
+
     <script>
       const form = document.getElementById("conversionForm");
       const progressContainer = document.querySelector(".progress-container");
       const progressFill = document.querySelector(".progress-fill");
       const messagesDiv = document.getElementById("messages");
-      const downloadLinkDiv = document.getElementById("download-link"); // Get download link div
+      const downloadLinkDiv = document.getElementById("download-link");
+      const fileTableContainer = document.getElementById(
+        "file-table-container"
+      );
+      const fileTableBody = document.getElementById("file-table-body");
 
       form.addEventListener("submit", async (e) => {
         e.preventDefault();
         progressContainer.style.display = "block";
-        downloadLinkDiv.style.display = "none"; // Hide download link on new conversion
+        downloadLinkDiv.style.display = "none";
+        fileTableContainer.style.display = "none";
         messagesDiv.innerHTML = "";
-        progressFill.style.width = "0%"; // Reset progress bar
+        progressFill.style.width = "0%";
+        fileTableBody.innerHTML = "";
 
-        const response = await fetch("/convert", {
+        const response = await fetch("/api/convert", {
           method: "POST",
           body: new FormData(form),
         });
 
         if (!response.ok) {
           alert("Error starting conversion");
-          progressContainer.style.display = "none"; // Hide progress on error
+          progressContainer.style.display = "none";
           return;
         }
 
-        const eventSource = new EventSource("/progress");
-        console.log("EventSource created:", eventSource); // Debug: Check if EventSource is created
+        const eventSource = new EventSource("/api/progress");
 
-        // Modify the event handler in the <script> section:
         eventSource.onmessage = (event) => {
           if (event.data === ": keep-alive") return;
 
           try {
-            // Handle potential raw string messages
             let data;
             try {
               data = JSON.parse(event.data);
             } catch (e) {
-              // If the message isn't JSON, check for special cases
               if (event.data.trim() === 'data: {"type": "complete"}') {
                 data = { type: "complete" };
               } else {
@@ -188,20 +233,40 @@
               case "progress":
                 const percent = ((data.current / data.total) * 100).toFixed(1);
                 progressFill.style.width = `${percent}%`;
-                messagesDiv.innerHTML += `
-                    <div class="message">
-                        ${data.message} - ${percent}%
-                    </div>`;
+                const messageDiv = document.createElement("div"); // Create a div for the message
+                messageDiv.className = "message"; // Apply message class
+                messageDiv.textContent = data.message; // Set message text (raw message now)
+                messagesDiv.appendChild(messageDiv); // Append to messages div
                 messagesDiv.scrollTop = messagesDiv.scrollHeight;
                 break;
               case "complete":
                 eventSource.close();
                 progressContainer.style.display = "none";
-                downloadLinkDiv.style.display = "block"; // Show download link
-                // Force refresh the download link
+                downloadLinkDiv.style.display = "block";
+                fileTableContainer.style.display = "block";
+
+                if (data.files && data.files.length > 0) {
+                  fileTableBody.innerHTML = "";
+                  data.files.forEach((file) => {
+                    const row = fileTableBody.insertRow();
+                    const filenameCell = row.insertCell();
+                    const downloadLinkCell = row.insertCell();
+
+                    filenameCell.textContent = file.filename;
+                    const downloadLink = document.createElement("a");
+                    downloadLink.href = file.download_url;
+                    downloadLink.textContent = "Download";
+                    downloadLinkCell.appendChild(downloadLink);
+                  });
+                } else {
+                  fileTableBody.innerHTML = `<tr><td colspan="2">No files generated.</td></tr>`;
+                }
+
                 document.getElementById(
                   "download-link"
-                ).innerHTML = `<a href="/download?t=${Date.now()}" target="_blank">Download PDF</a>`;
+                ).innerHTML = `<a href="/api/download?filename=${
+                  data.files[0].filename
+                }&t=${Date.now()}" target="_blank">Download PDF</a>`;
                 break;
               case "error":
                 eventSource.close();
@@ -223,7 +288,7 @@
         eventSource.onerror = (error) => {
           console.error("EventSource failed:", error);
           eventSource.close();
-          progressContainer.style.display = "none"; // Hide progress on event source error
+          progressContainer.style.display = "none";
           alert("Error receiving progress updates.");
         };
       });
