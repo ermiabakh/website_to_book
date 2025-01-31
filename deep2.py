@@ -22,14 +22,14 @@ class Crawler:
         self.visited = set()
         self.to_visit = []
         self.base_domain = urlparse(root_url).netloc
-        self.base_path = urlparse(root_url).path.rstrip('/')
         self.progress_bar = None
+        # Mark root as visited immediately
+        self.visited.add(root_url)
+        self.to_visit.append((root_url, 0))
 
     def is_valid_url(self, url: str) -> bool:
         parsed = urlparse(url)
         if parsed.netloc != self.base_domain:
-            return False
-        if not parsed.path.startswith(self.base_path):
             return False
         if parsed.fragment:
             return False
@@ -46,21 +46,19 @@ class Crawler:
         return links
 
     async def crawl(self) -> List[str]:
-        self.to_visit = [(self.root_url, 0)]
         ordered_urls = []
-
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             context = await browser.new_context()
             page_pool = [await context.new_page() for _ in range(multiprocessing.cpu_count() * 2)]
 
             tasks = set()
-
             with tqdm(desc=f"Crawling {self.root_url}", unit="page",
-                      bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]") as pbar:
+                      dynamic_ncols=True, bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]") as pbar:
                 self.progress_bar = pbar
 
                 while self.to_visit or tasks:
+                    # Schedule new tasks
                     while self.to_visit and len(tasks) < len(page_pool):
                         url, depth = self.to_visit.pop(0)
                         if depth > self.max_depth:
@@ -70,6 +68,7 @@ class Crawler:
                         tasks.add(task)
                         task.add_done_callback(lambda t, p=page: (tasks.remove(t), page_pool.append(p)))
 
+                    # Process completed tasks
                     if tasks:
                         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
                         for task in done:
@@ -82,13 +81,13 @@ class Crawler:
                                             self.visited.add(link)
                                             self.to_visit.append((link, result_depth + 1))
 
-                                pbar.total = len(self.visited) + len(self.to_visit) + len(tasks)
+                                pbar.total = len(self.visited)
                                 pbar.set_postfix({
                                     'depth': result_depth,
                                     'queued': len(self.to_visit),
                                     'found': len(self.visited),
                                     'pending': len(tasks)
-                                })
+                                }, refresh=False)
                                 pbar.update(1)
                             except Exception as e:
                                 logging.error(f"Error processing task: {str(e)}")
@@ -100,15 +99,15 @@ class Crawler:
 
     async def crawl_page(self, url: str, depth: int, page):
         try:
-            await page.goto(url, timeout=60000)
+            # Wait for network idle to capture dynamic content
+            await page.goto(url, timeout=120000, wait_until='networkidle')
             await page.wait_for_selector('body', timeout=30000)
             html = await page.content()
-
-            self.visited.add(url)
 
             links = []
             if depth < self.max_depth:
                 links = self.extract_links(url, html)
+                self.progress_bar.write(f"Found {len(links)} links at depth {depth}")
 
             return url, depth, links
         except Exception as e:
@@ -122,9 +121,11 @@ async def generate_pdf(task: Tuple[int, str, Path, asyncio.Queue]) -> Tuple[int,
 
     try:
         page = await page_queue.get()
-
-        await page.goto(url, timeout=60000)
+        # Wait for network idle before generating PDF
+        await page.goto(url, timeout=120000, wait_until='networkidle')
         await page.wait_for_selector('body', timeout=30000)
+        
+        # Try to wait for main content
         try:
             await page.wait_for_selector('main', timeout=5000)
         except:
@@ -146,6 +147,8 @@ async def generate_pdf(task: Tuple[int, str, Path, asyncio.Queue]) -> Tuple[int,
     except Exception as e:
         logging.error(f"Error generating PDF for {url}: {str(e)}")
         return (index, "", False)
+
+# Rest of the code remains the same as original for merge_pdfs and main function
 
 def merge_pdfs(pdf_files: List[Tuple[int, str]], output_path: str, temp_dir: Path):
     num_processes = multiprocessing.cpu_count()
@@ -207,8 +210,8 @@ async def main():
     parser = argparse.ArgumentParser(description='Website to PDF Book Converter')
     parser.add_argument('url', help='Root URL to start crawling')
     parser.add_argument('output', help='Output PDF filename')
-    parser.add_argument('--max-depth', type=int, default=2, 
-                       help='Maximum crawl depth (default: 2)')
+    parser.add_argument('--max-depth', type=int, default=5, 
+                       help='Maximum crawl depth (default: 5)')
     parser.add_argument('--workers', type=int, default=4,
                        help='Number of parallel workers (default: 4)')
     parser.add_argument('--temp-dir', default='temp_pages',
@@ -226,11 +229,7 @@ async def main():
     
     # Crawling phase
     crawler = Crawler(args.url, args.max_depth)
-    
-    async def run_crawler():
-        return await crawler.crawl()
-
-    urls = await run_crawler()
+    urls = await crawler.crawl()
     
     print(f"\n{' Conversion Phase ':=^50}")
     print(f"Total unique pages found: {len(urls)}")
@@ -256,7 +255,7 @@ async def main():
             pdf_tasks = [generate_pdf(task) for task in tasks]
             
             with tqdm(total=len(pdf_tasks), desc="Generating PDFs", unit="page",
-                    bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{percentage:.0f}%] {postfix}") as pbar:
+                    dynamic_ncols=True, bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{percentage:.0f}%] {postfix}") as pbar:
                 
                 results = []
                 for f in asyncio.as_completed(pdf_tasks):
@@ -266,7 +265,7 @@ async def main():
                     
                     if success:
                         success_count += 1
-                        pbar.set_postfix_str(f"Last: {title[:30]}...")
+                        pbar.set_postfix_str(f"Last: {title[:30]}...", refresh=False)
                     else:
                         failed_urls.append((index, title))
                     
