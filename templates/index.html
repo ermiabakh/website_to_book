@@ -5,7 +5,7 @@
     <style>
       body {
         font-family: Arial, sans-serif;
-        max-width: 800px;
+        max-width: 1000px; /* Increased max-width */
         margin: 0 auto;
         padding: 20px;
       }
@@ -83,26 +83,40 @@
         background: #0056b3;
       }
 
-      #file-table-container {
+      #file-table-container,
+      #crawled-url-table-container,
+      #statistics-container {
         margin-top: 20px;
         display: none; /* Initially hidden */
       }
 
-      #file-table {
+      #file-table,
+      #crawled-url-table,
+      #statistics-table {
         width: 100%;
         border-collapse: collapse;
         margin-top: 10px;
       }
 
       #file-table th,
-      #file-table td {
+      #file-table td,
+      #crawled-url-table th,
+      #crawled-url-table td,
+      #statistics-table th,
+      #statistics-table td {
         border: 1px solid #ddd;
         padding: 8px;
         text-align: left;
       }
 
-      #file-table th {
+      #file-table th,
+      #crawled-url-table th,
+      #statistics-table th {
         background-color: #f0f0f0;
+      }
+      #crawled-url-table td a {
+        word-break: break-all; /* Break long URLs */
+        display: block; /* Make link fill cell width */
       }
     </style>
   </head>
@@ -162,21 +176,55 @@
       <div id="messages"></div>
     </div>
 
+    <div id="crawled-url-table-container" style="display: none">
+      <h3>Crawled URLs</h3>
+      <table id="crawled-url-table">
+        <thead>
+          <tr>
+            <th>URL</th>
+          </tr>
+        </thead>
+        <tbody id="crawled-url-table-body">
+          <!-- Crawled URLs will be added here by JavaScript -->
+        </tbody>
+      </table>
+    </div>
+
     <div id="download-link" style="display: none">
       <a id="download-anchor" href="#" target="_blank">Download PDF</a>
     </div>
 
-    <div id="file-table-container" style="display: none">
+    <div id="file-table-container">
       <h3>Generated Files</h3>
       <table id="file-table">
         <thead>
           <tr>
             <th>Filename</th>
+            <th>Website URL</th>
+            <th>Conversion Time</th>
+            <th>Crawled Links</th>
+            <th>Successful Pages</th>
+            <th>Failed Pages</th>
             <th>Download Link</th>
           </tr>
         </thead>
         <tbody id="file-table-body">
           <!-- File rows will be added here by JavaScript -->
+        </tbody>
+      </table>
+    </div>
+
+    <div id="statistics-container" style="display: none">
+      <h3>Conversion Statistics</h3>
+      <table id="statistics-table">
+        <thead>
+          <tr>
+            <th>Statistic</th>
+            <th>Value</th>
+          </tr>
+        </thead>
+        <tbody id="statistics-table-body">
+          <!-- Statistics will be added here by JavaScript -->
         </tbody>
       </table>
     </div>
@@ -191,17 +239,71 @@
         "file-table-container"
       );
       const fileTableBody = document.getElementById("file-table-body");
+      const crawledUrlTableContainer = document.getElementById(
+        "crawled-url-table-container"
+      );
+      const crawledUrlTableBody = document.getElementById(
+        "crawled-url-table-body"
+      );
+      const statisticsContainer = document.getElementById(
+        "statistics-container"
+      );
+      const statisticsTableBody = document.getElementById(
+        "statistics-table-body"
+      );
+
+      function populateFileTable(files) {
+        fileTableBody.innerHTML = "";
+        if (files && files.length > 0) {
+          files.forEach((file) => {
+            const row = fileTableBody.insertRow();
+            row.insertCell().textContent = file.filename;
+            row.insertCell().textContent = file.website_url;
+            row.insertCell().textContent = new Date(
+              file.conversion_timestamp
+            ).toLocaleString();
+            row.insertCell().textContent = file.total_links_crawled;
+            row.insertCell().textContent = file.successful_pages;
+            row.insertCell().textContent = file.failed_pages;
+
+            const downloadLinkCell = row.insertCell();
+            const downloadLink = document.createElement("a");
+            downloadLink.href = file.download_url;
+            downloadLink.textContent = "Download";
+            downloadLinkCell.appendChild(downloadLink);
+          });
+          fileTableContainer.style.display = "block"; // Show file table if files exist
+        } else {
+          fileTableBody.innerHTML = `<tr><td colspan="7">No files generated yet.</td></tr>`;
+          fileTableContainer.style.display = "block"; // Show even if empty, with message
+        }
+      }
+
+      async function loadExistingFiles() {
+        const response = await fetch("/files");
+        if (response.ok) {
+          const data = await response.json();
+          populateFileTable(data.files);
+        } else {
+          console.error("Failed to load existing files.");
+          fileTableBody.innerHTML = `<tr><td colspan="7" class="error">Failed to load files.</td></tr>`;
+          fileTableContainer.style.display = "block";
+        }
+      }
 
       form.addEventListener("submit", async (e) => {
         e.preventDefault();
         progressContainer.style.display = "block";
         downloadLinkDiv.style.display = "none";
         fileTableContainer.style.display = "none";
+        crawledUrlTableContainer.style.display = "none";
+        statisticsContainer.style.display = "none"; // Hide statistics container on new conversion start
         messagesDiv.innerHTML = "";
         progressFill.style.width = "0%";
-        fileTableBody.innerHTML = "";
+        crawledUrlTableBody.innerHTML = ""; // Clear crawled URLs table
+        // fileTableBody.innerHTML = "";  // Keep existing files table visible
 
-        const response = await fetch("/api/convert", {
+        const response = await fetch("/convert", {
           method: "POST",
           body: new FormData(form),
         });
@@ -212,7 +314,7 @@
           return;
         }
 
-        const eventSource = new EventSource("/api/progress");
+        const eventSource = new EventSource("/progress");
 
         eventSource.onmessage = (event) => {
           if (event.data === ": keep-alive") return;
@@ -228,50 +330,129 @@
                 throw e;
               }
             }
-
+            const messageDiv = document.createElement("div");
             switch (data.type) {
+              case "crawling_urls_init":
+                crawledUrlTableBody.innerHTML = ""; // Clear crawled URLs table initially
+                crawledUrlTableContainer.style.display = "block"; // Show crawled URLs table container
+                break;
+              case "crawling_start":
+                crawledUrlTableBody.innerHTML = ""; // Clear crawled URLs when crawling starts
+                crawledUrlTableContainer.style.display = "block"; // Ensure it's visible
+                break;
               case "progress":
                 const percent = ((data.current / data.total) * 100).toFixed(1);
                 progressFill.style.width = `${percent}%`;
-                const messageDiv = document.createElement("div"); // Create a div for the message
-                messageDiv.className = "message"; // Apply message class
-                messageDiv.textContent = data.message; // Set message text (raw message now)
-                messagesDiv.appendChild(messageDiv); // Append to messages div
+                messageDiv.className = "message";
+                messageDiv.textContent = data.message;
+                messagesDiv.appendChild(messageDiv);
+                messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                break;
+              case "message":
+                messageDiv.className = "message";
+                messageDiv.textContent = data.message;
+                messagesDiv.appendChild(messageDiv);
                 messagesDiv.scrollTop = messagesDiv.scrollHeight;
                 break;
               case "complete":
                 eventSource.close();
                 progressContainer.style.display = "none";
                 downloadLinkDiv.style.display = "block";
-                fileTableContainer.style.display = "block";
+                crawledUrlTableContainer.style.display = "none"; // Hide crawled urls table after completion
+                statisticsContainer.style.display = "block"; // Show statistics container on completion
 
                 if (data.files && data.files.length > 0) {
-                  fileTableBody.innerHTML = "";
-                  data.files.forEach((file) => {
-                    const row = fileTableBody.insertRow();
-                    const filenameCell = row.insertCell();
-                    const downloadLinkCell = row.insertCell();
-
-                    filenameCell.textContent = file.filename;
-                    const downloadLink = document.createElement("a");
-                    downloadLink.href = file.download_url;
-                    downloadLink.textContent = "Download";
-                    downloadLinkCell.appendChild(downloadLink);
-                  });
+                  populateFileTable(data.files); // Update file table with new files
+                  document.getElementById(
+                    "download-link"
+                  ).innerHTML = `<a href="/download?filename=${
+                    data.files[0].filename
+                  }&t=${Date.now()}" target="_blank">Download PDF</a>`;
                 } else {
-                  fileTableBody.innerHTML = `<tr><td colspan="2">No files generated.</td></tr>`;
+                  // fileTableBody.innerHTML = `<tr><td colspan="7">No files generated.</td></tr>`; // Handled by populateFileTable if files are empty
+                  populateFileTable([]); // Update file table to reflect no new files if needed.
                 }
 
-                document.getElementById(
-                  "download-link"
-                ).innerHTML = `<a href="/api/download?filename=${
-                  data.files[0].filename
-                }&t=${Date.now()}" target="_blank">Download PDF</a>`;
+                // Display crawled URLs in the table
+                if (data.crawled_urls && data.crawled_urls.length > 0) {
+                  crawledUrlTableBody.innerHTML = ""; // Clear existing rows
+                  data.crawled_urls.forEach((url) => {
+                    const row = crawledUrlTableBody.insertRow();
+                    const urlCell = row.insertCell();
+                    const urlLink = document.createElement("a");
+                    urlLink.href = url;
+                    urlLink.textContent = url;
+                    urlCell.appendChild(urlLink);
+                  });
+                  crawledUrlTableContainer.style.display = "block"; // Show the table
+                } else {
+                  crawledUrlTableContainer.style.display = "none"; // Hide if no crawled URLs
+                }
+
+                // Update file table again to refresh from DB and show new entry
+                loadExistingFiles();
+
+                // Example Statistics Data - Replace with actual data from backend if needed.
+                const statisticsData = [
+                  {
+                    name: "Total Links Crawled",
+                    value:
+                      data.files && data.files[0]
+                        ? data.files[0].total_links_crawled
+                        : "N/A",
+                  },
+                  {
+                    name: "Successful Pages",
+                    value:
+                      data.files && data.files[0]
+                        ? data.files[0].successful_pages
+                        : "N/A",
+                  },
+                  {
+                    name: "Failed Pages",
+                    value:
+                      data.files && data.files[0]
+                        ? data.files[0].failed_pages
+                        : "N/A",
+                  },
+                  {
+                    name: "Conversion Timestamp",
+                    value:
+                      data.files && data.files[0]
+                        ? new Date(
+                            data.files[0].conversion_timestamp
+                          ).toLocaleString()
+                        : "N/A",
+                  },
+                  {
+                    name: "Website URL",
+                    value:
+                      data.files && data.files[0]
+                        ? data.files[0].website_url
+                        : "N/A",
+                  },
+                ];
+                statisticsTableBody.innerHTML = ""; // Clear existing stats
+                statisticsData.forEach((stat) => {
+                  const row = statisticsTableBody.insertRow();
+                  row.insertCell().textContent = stat.name;
+                  row.insertCell().textContent = stat.value;
+                });
+                statisticsContainer.style.display = "block"; // Show statistics table
+
                 break;
               case "error":
                 eventSource.close();
                 progressContainer.style.display = "none";
-                alert(`Error: ${data.message}`);
+                crawledUrlTableContainer.style.display = "none"; // Hide crawled urls table on error
+                statisticsContainer.style.display = "none"; // Hide statistics container on error
+                // Instead of alert, show error message in the messages div
+                const errorDiv = document.createElement("div");
+                errorDiv.className = "message error"; // Apply error class for styling
+                errorDiv.textContent = `Conversion Error: ${data.message}`;
+                messagesDiv.appendChild(errorDiv);
+                messagesDiv.scrollTop = messagesDiv.scrollHeight;
+
                 break;
             }
           } catch (e) {
@@ -289,9 +470,19 @@
           console.error("EventSource failed:", error);
           eventSource.close();
           progressContainer.style.display = "none";
-          alert("Error receiving progress updates.");
+          crawledUrlTableContainer.style.display = "none"; // Hide crawled urls table on error
+          statisticsContainer.style.display = "none"; // Hide statistics container on error
+          // Show a generic error message in messages div on eventSource error
+          const errorDiv = document.createElement("div");
+          errorDiv.className = "message error";
+          errorDiv.textContent = "Error receiving progress updates.";
+          messagesDiv.appendChild(errorDiv);
+          messagesDiv.scrollTop = messagesDiv.scrollHeight;
         };
       });
+
+      // Load existing files when page loads
+      document.addEventListener("DOMContentLoaded", loadExistingFiles);
     </script>
   </body>
 </html>
