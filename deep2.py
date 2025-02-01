@@ -3,7 +3,6 @@ import asyncio
 import json
 import logging
 import multiprocessing
-import re
 import time
 from pathlib import Path
 from typing import List, Tuple, Dict, Any
@@ -19,7 +18,6 @@ from quart.helpers import stream_with_context
 from playwright.async_api import async_playwright
 from tqdm import tqdm
 from werkzeug.utils import secure_filename
-from asgiref.wsgi import WsgiToAsgi
 
 logging.basicConfig(filename='/tmp/crawler.log', level=logging.ERROR)
 app = Quart(__name__)
@@ -506,8 +504,6 @@ async def download():
     response.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
     return response
 
-# Netlify Function Handler
-asgi_app = WsgiToAsgi(app)
 
 if __name__ == "__main__":
     app.run(debug=True)
