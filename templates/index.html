@@ -469,13 +469,11 @@
         eventSource.onerror = (error) => {
           console.error("EventSource failed:", error);
           eventSource.close();
-          progressContainer.style.display = "none";
-          crawledUrlTableContainer.style.display = "none"; // Hide crawled urls table on error
-          statisticsContainer.style.display = "none"; // Hide statistics container on error
           // Show a generic error message in messages div on eventSource error
           const errorDiv = document.createElement("div");
           errorDiv.className = "message error";
-          errorDiv.textContent = "Error receiving progress updates.";
+          errorDiv.textContent =
+            "Error receiving progress updates from server. Please check your connection or server.";
           messagesDiv.appendChild(errorDiv);
           messagesDiv.scrollTop = messagesDiv.scrollHeight;
         };

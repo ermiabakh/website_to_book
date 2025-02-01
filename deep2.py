@@ -426,7 +426,7 @@ async def convert():
             else:
                 current_process['generated_files'] = []
 
-            await current_process['messages'].put({'type': 'complete', 'crawled_urls': current_process['crawled_urls']}) # Send crawled URLs on complete
+            await current_process['messages'].put({'type': 'complete', 'files': current_process['generated_files'], 'crawled_urls': current_process['crawled_urls']}) # Send crawled URLs on complete
 
         except Exception as e:
             await current_process['messages'].put({'type': 'error', 'message': str(e)})
