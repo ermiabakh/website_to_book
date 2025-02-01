@@ -1,0 +1,6 @@
+{
+    "name": "Python Quart App",
+    "image": "mcr.microsoft.com/devcontainers/python:3.10-bullseye", // Or your preferred Python image
+    "forwardPorts": [5000], // Forward the port your Quart app runs on
+    "postCreateCommand": "pip install -r requirements.txt && python deep2.py" // Command to run after container creation
+}
