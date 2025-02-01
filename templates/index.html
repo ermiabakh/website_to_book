@@ -315,6 +315,7 @@
         }
 
         const eventSource = new EventSource("/progress");
+        let eventSourceErrored = false; // Flag to track if EventSource had an error
 
         eventSource.onmessage = (event) => {
           if (event.data === ": keep-alive") return;
@@ -452,6 +453,7 @@
                 errorDiv.textContent = `Conversion Error: ${data.message}`;
                 messagesDiv.appendChild(errorDiv);
                 messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                eventSourceErrored = true; // Set the flag when an error message is received
 
                 break;
             }
@@ -468,14 +470,16 @@
 
         eventSource.onerror = (error) => {
           console.error("EventSource failed:", error);
-          eventSource.close();
-          // Show a generic error message in messages div on eventSource error
-          const errorDiv = document.createElement("div");
-          errorDiv.className = "message error";
-          errorDiv.textContent =
-            "Error receiving progress updates from server. Please check your connection or server.";
-          messagesDiv.appendChild(errorDiv);
-          messagesDiv.scrollTop = messagesDiv.scrollHeight;
+          if (!eventSourceErrored) {
+            // Only show generic error if specific error message hasn't been shown
+            const errorDiv = document.createElement("div");
+            errorDiv.className = "message error";
+            errorDiv.textContent =
+              "Error receiving progress updates from server. Please check your connection or server.";
+            messagesDiv.appendChild(errorDiv);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+          }
+          eventSource.close(); // Close EventSource on error
         };
       });
 
