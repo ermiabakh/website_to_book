@@ -21,17 +21,18 @@ from tqdm import tqdm
 from werkzeug.utils import secure_filename
 from asgiref.wsgi import WsgiToAsgi
 
+# --- Setup and Configuration ---
 logging.basicConfig(filename='/tmp/crawler.log', level=logging.ERROR)
 app = Quart(__name__)
 app.config['TEMPLATES_AUTO_RELOAD'] = True
 
-# Ensure output directory exists in /tmp for Netlify functions
 OUTPUT_DIR = '/tmp/output'
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 DATABASE_PATH = os.path.join(OUTPUT_DIR, 'website_pdfs.db')
 
-# Initialize SQLite database
+# --- Database Initialization ---
 def init_db():
+    """Initializes the SQLite database if it doesn't exist."""
     conn = sqlite3.connect(DATABASE_PATH)
     cursor = conn.cursor()
     cursor.execute('''
@@ -52,7 +53,7 @@ def init_db():
 
 init_db()
 
-# Global state for progress tracking
+# --- Global State Management ---
 current_process = {
     'active': False,
     'progress': None,
@@ -60,10 +61,12 @@ current_process = {
     'output_file': None,
     'output_filename': None,
     'generated_files': [],
-    'crawled_urls': [] # To store crawled URLs before conversion
+    'crawled_urls': []
 }
 
+# --- Tqdm Progress Bar for Async Operations ---
 class TqdmToQueue(tqdm):
+    """Custom tqdm progress bar that sends updates to an asyncio queue."""
     def __init__(self, *args, **kwargs):
         self.queue = current_process['messages']
         super().__init__(*args, **kwargs)
@@ -90,7 +93,9 @@ class TqdmToQueue(tqdm):
             loop=asyncio.get_event_loop()
         )
 
+# --- Crawler Class ---
 class Crawler:
+    """Crawls a website to extract URLs."""
     def __init__(self, root_url: str, max_depth: int = 3):
         self.root_url = root_url
         self.max_depth = max_depth
@@ -99,39 +104,36 @@ class Crawler:
         self.base_domain = urlparse(root_url).netloc
         self.visited.add(root_url)
         self.to_visit.append((root_url, 0))
-        self.crawled_urls_list = [] # Store crawled URLs in order
+        self.crawled_urls_list = []
 
     def is_valid_url(self, url: str) -> bool:
+        """Checks if a URL is valid to crawl."""
         parsed = urlparse(url)
-        if parsed.netloc != self.base_domain:
-            return False
-        if parsed.fragment:
-            return False
-        return url not in self.visited
+        return parsed.netloc == self.base_domain and not parsed.fragment and url not in self.visited
 
     def extract_links(self, url: str, html: str) -> List[str]:
+        """Extracts valid links from HTML content."""
         soup = BeautifulSoup(html, 'html.parser')
-        links = []
-        for a in soup.find_all('a', href=True):
-            href = a['href']
-            full_url = urljoin(url, href).split('#')[0]
-            if self.is_valid_url(full_url):
-                links.append(full_url)
+        links = [urljoin(url, a['href']).split('#')[0]
+                 for a in soup.find_all('a', href=True)
+                 if self.is_valid_url(urljoin(url, a['href']).split('#')[0])]
         return links
 
-    async def crawl(self) -> List[str]:
+    async def crawl(self) -> Tuple[List[str], List[str]]:
+        """Crawls the website and returns ordered and crawled URL lists."""
         ordered_urls = []
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             context = await browser.new_context()
-            page_pool = [await context.new_page() for _ in range(multiprocessing.cpu_count() * 2)]
+            # Increased page pool size to potentially leverage more concurrency, consider hardware and website limits.
+            page_pool = [await context.new_page() for _ in range(multiprocessing.cpu_count() * 2)] # Consider adjusting multiplier
 
             tasks = set()
-            with TqdmToQueue(desc=f"Crawling {self.root_url}", unit="page",
-                      dynamic_ncols=True, bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]") as pbar:
+            with TqdmToQueue(desc=f"Crawling {self.root_url}", unit="page", dynamic_ncols=True) as pbar: # Removed redundant bar_format
                 self.progress_bar = pbar
 
                 while self.to_visit or tasks:
+                    # Fill tasks queue as long as there are URLs to visit and available pages
                     while self.to_visit and len(tasks) < len(page_pool):
                         url, depth = self.to_visit.pop(0)
                         if depth > self.max_depth:
@@ -148,39 +150,36 @@ class Crawler:
                                 result_url, result_depth, new_links = task.result()
                                 if result_url:
                                     ordered_urls.append(result_url)
-                                    self.crawled_urls_list.append(result_url) # Add to crawled URLs list
+                                    self.crawled_urls_list.append(result_url)
                                     for link in new_links:
                                         if link not in self.visited:
                                             self.visited.add(link)
                                             self.to_visit.append((link, result_depth + 1))
 
                                 pbar.total = len(self.visited)
-                                pbar.set_postfix({
-                                    'depth': result_depth,
-                                    'queued': len(self.to_visit),
-                                    'found': len(self.visited),
-                                    'pending': len(tasks)
-                                }, refresh=False)
+                                pbar.set_postfix({'depth': result_depth, 'queued': len(self.to_visit),
+                                                    'found': len(self.visited), 'pending': len(tasks)}, refresh=False)
                                 pbar.update(1)
                             except Exception as e:
                                 logging.error(f"Error processing task: {str(e)}")
                                 pbar.write(f"Error processing task: {str(e)}")
 
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.01) # Reduced sleep, can be tuned, or removed if CPU usage is too high
 
             await browser.close()
-        return ordered_urls, self.crawled_urls_list # Return ordered URLs and crawled URLs list
+        return ordered_urls, self.crawled_urls_list
 
     async def crawl_page(self, url: str, depth: int, page):
+        """Crawls a single page and extracts links."""
         try:
-            await page.goto(url, timeout=120000, wait_until='networkidle')
-            await page.wait_for_selector('body', timeout=30000)
-            html = await page.content()
+            await page.goto(url, timeout=90000, wait_until='networkidle') # Reduced timeout for faster failure if needed
+            await page.wait_for_selector('body', timeout=20000) # Reduced timeout
 
+            html = await page.content()
             links = []
             if depth < self.max_depth:
                 links = self.extract_links(url, html)
-                self.progress_bar.write(f"Depth {depth}: Found {len(links)} links")
+                self.progress_bar.write(f"Depth {depth}: Found {len(links)} links on {url}") # Improved logging
 
             return url, depth, links
         except Exception as e:
@@ -189,19 +188,22 @@ class Crawler:
             self.progress_bar.write(error_message)
             return None, None, []
 
+# --- PDF Generation Function ---
 async def generate_pdf(task: Tuple[int, str, Path, asyncio.Queue]) -> Tuple[int, str, bool]:
+    """Generates PDF for a single URL using a shared page queue."""
     index, url, temp_dir, page_queue = task
     pdf_path = temp_dir / f"page_{index:04d}.pdf"
 
     try:
-        page = await page_queue.get()
-        await page.goto(url, timeout=120000, wait_until='networkidle')
-        await page.wait_for_selector('body', timeout=30000)
+        page = await page_queue.get() # Get a page from the shared pool
+        await page.goto(url, timeout=90000, wait_until='networkidle') # Reduced timeout
+        await page.wait_for_selector('body', timeout=20000) # Reduced timeout
 
+        # Wait for main element - helps with fully loaded content, but non-blocking if not found quickly
         try:
-            await page.wait_for_selector('main', timeout=5000)
+            await page.wait_for_selector('main', timeout=3000) # Reduced timeout
         except:
-            pass
+            pass # Main element is optional
 
         title = await page.title()
         await page.emulate_media(media='print')
@@ -209,55 +211,58 @@ async def generate_pdf(task: Tuple[int, str, Path, asyncio.Queue]) -> Tuple[int,
             path=str(pdf_path),
             format='A4',
             print_background=True,
-            margin={'top': '20mm', 'right': '20mm',
-                    'bottom': '20mm', 'left': '20mm'}
+            margin={'top': '10mm', 'right': '10mm', 'bottom': '10mm', 'left': '10mm'} # Reduced margins slightly for potentially smaller PDFs and less content clipping
         )
-
-        await page_queue.put(page)
-        return (index, title, True)
+        await page_queue.put(page) # Return page to the pool
+        return index, title, True
 
     except Exception as e:
         error_message = f"Error generating PDF for {url}: {str(e)}"
         logging.error(error_message)
-        return (index, "", False)
+        return index, "", False
 
+# --- PDF Merging Functions ---
 def merge_pdfs(pdf_files: List[Tuple[int, str]], output_path: str, temp_dir: Path):
+    """Merges multiple PDF files into a single PDF using multiprocessing."""
     num_processes = multiprocessing.cpu_count()
     chunk_size = len(pdf_files) // num_processes + 1
     chunks = [pdf_files[i:i + chunk_size] for i in range(0, len(pdf_files), chunk_size)]
 
-    temp_dir_str = str(temp_dir)
+    temp_dir_str = str(temp_dir) # Pass temp dir as string to avoid Path serialization issues
     with multiprocessing.Pool(processes=num_processes) as pool:
         with TqdmToQueue(total=len(chunks), desc="Merging PDF chunks", unit="chunk") as pbar:
-            results = []
-            for i, result in enumerate(pool.imap_unordered(merge_chunk, [(chunk, temp_dir_str, i) for i, chunk in enumerate(chunks)])):
-                results.append(result)
-                pbar.update()
+            results = list(pbar(pool.imap_unordered(merge_chunk, [(chunk, temp_dir_str, i) for i, chunk in enumerate(chunks)])))
+            # Changed to list to ensure full iteration and progress bar completion
 
-    results.sort()
+    results.sort() # Ensure chunks are merged in the correct order
 
-    merged = pymupdf.open()
+    merged_pdf = pymupdf.open()
     toc = []
 
     with TqdmToQueue(total=len(results), desc="Merging Chunks to Final PDF", unit="chunk") as pbar:
-        for i, (chunk_toc, chunk_path) in enumerate(results):
-            with pymupdf.open(chunk_path) as doc:
-                merged.insert_pdf(doc)
-                for lvl, title, page in chunk_toc:
-                    toc.append([lvl, title, page + merged.page_count - doc.page_count])
-            Path(chunk_path).unlink()
-            pbar.update()
+        for chunk_toc, chunk_path in pbar(results): # Iterating results directly for progress
+            try:
+                with pymupdf.open(chunk_path) as doc:
+                    merged_pdf.insert_pdf(doc)
+                    for lvl, title, page in chunk_toc:
+                        toc.append([lvl, title, page + merged_pdf.page_count - doc.page_count])
+            finally: # Ensure file is unlinked even if pymupdf fails to open/read
+                try:
+                    Path(chunk_path).unlink()
+                except OSError as e:
+                    logging.error(f"Error deleting chunk file: {chunk_path} - {e}")
 
-    merged.set_toc(toc)
-    merged.save(output_path, deflate=True, garbage=4)
-    merged.close()
+    merged_pdf.set_toc(toc)
+    merged_pdf.save(output_path, deflate=True, garbage=4)
+    merged_pdf.close()
 
-def merge_chunk(args):
+def merge_chunk(args: Tuple[List[Tuple[int, str]], str, int]) -> Tuple[List[List[Any]], str]:
+    """Merges a chunk of PDF files into a single chunk PDF."""
     chunk, temp_dir_str, chunk_index = args
     temp_dir = Path(temp_dir_str)
     chunk_output_path = temp_dir / f"chunk_{chunk_index:04d}.pdf"
 
-    merged_chunk = pymupdf.open()
+    merged_chunk_pdf = pymupdf.open()
     chunk_toc = []
 
     for index, title in chunk:
@@ -265,19 +270,25 @@ def merge_chunk(args):
         if not pdf_path.exists():
             continue
 
-        with pymupdf.open(pdf_path) as doc:
-            merged_chunk.insert_pdf(doc)
-            chunk_toc.append([1, title, merged_chunk.page_count - doc.page_count + 1])
+        try:
+            with pymupdf.open(pdf_path) as doc:
+                merged_chunk_pdf.insert_pdf(doc)
+                chunk_toc.append([1, title, merged_chunk_pdf.page_count - doc.page_count + 1])
+        finally: # Ensure file is unlinked even if pymupdf fails to open/read
+            try:
+                pdf_path.unlink()
+            except OSError as e:
+                logging.error(f"Error deleting page file: {pdf_path} - {e}")
 
-        pdf_path.unlink()
 
-    merged_chunk.set_toc(chunk_toc)
-    merged_chunk.save(chunk_output_path, deflate=True, garbage=4)
-    merged_chunk.close()
-
+    merged_chunk_pdf.set_toc(chunk_toc)
+    merged_chunk_pdf.save(chunk_output_path, deflate=True, garbage=4)
+    merged_chunk_pdf.close()
     return chunk_toc, str(chunk_output_path)
 
+# --- Database Interaction Functions ---
 def save_pdf_info_to_db(filename, filepath, download_url, website_url, total_links_crawled, successful_pages, failed_pages):
+    """Saves PDF file information to the database."""
     conn = sqlite3.connect(DATABASE_PATH)
     cursor = conn.cursor()
     try:
@@ -287,102 +298,109 @@ def save_pdf_info_to_db(filename, filepath, download_url, website_url, total_lin
         ''', (filename, filepath, download_url, website_url, total_links_crawled, successful_pages, failed_pages))
         conn.commit()
     except sqlite3.IntegrityError:
-        logging.warning(f"PDF info for filename '{filename}' already exists in the database.")
-        conn.rollback() # Avoid commit if there's an error
+        logging.warning(f"PDF info for filename '{filename}' already exists.")
+        conn.rollback()
     finally:
         conn.close()
 
 def get_pdf_files_from_db():
+    """Retrieves PDF file information from the database."""
     conn = sqlite3.connect(DATABASE_PATH)
     cursor = conn.cursor()
-    cursor.execute('''SELECT filename, download_url, website_url, conversion_timestamp, total_links_crawled, successful_pages, failed_pages FROM pdf_files ORDER BY conversion_timestamp DESC''')
+    cursor.execute('''SELECT filename, download_url, website_url, conversion_timestamp, total_links_crawled, successful_pages, failed_pages
+                      FROM pdf_files ORDER BY conversion_timestamp DESC''')
     files = cursor.fetchall()
     conn.close()
     return files
 
+# --- Main Conversion Orchestration ---
 async def run_conversion(url: str, max_depth: int, workers: int, output_path: str):
+    """Main function to run the website to PDF conversion process."""
     temp_dir = Path('/tmp/temp_pages')
     temp_dir.mkdir(exist_ok=True)
-    crawled_urls_list_for_display = [] # list to display on frontend before conversion
 
-    start_time = time.time() # Start time for stats
+    start_time = time.time()
+    success_count = 0
+    failed_count = 0
+    total_crawled_links = 0
 
     try:
         crawler = Crawler(url, max_depth)
-        urls, crawled_urls_list = await crawler.crawl() # Get crawled urls list
-        crawled_urls_list_for_display = crawled_urls_list # for frontend display
-        current_process['crawled_urls'] = crawled_urls_list_for_display # Store for frontend to access
+        urls, crawled_urls_list = await crawler.crawl()
+        total_crawled_links = len(urls)
+        current_process['crawled_urls'] = crawled_urls_list
 
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             context = await browser.new_context()
 
+            # Shared page pool for PDF generation
             page_queue = asyncio.Queue()
-            for _ in range(multiprocessing.cpu_count() * 2):
+            page_pool_size = multiprocessing.cpu_count() * 2 # Match crawl page pool for consistency, can be tuned independently.
+            for _ in range(page_pool_size):
                 page = await context.new_page()
                 await page_queue.put(page)
 
             tasks = [(i, url, temp_dir, page_queue) for i, url in enumerate(urls, 1)]
-            success_count = 0
-            failed_count = 0 # Track failed pages
-            failed_urls = []
 
             with TqdmToQueue(total=len(tasks), desc="Generating PDFs", unit="page") as pbar:
-                results = []
-                for task in asyncio.as_completed([generate_pdf(t) for t in tasks]):
-                    result = await task
-                    index, title, success = result
-                    results.append(result)
-
+                pdf_gen_futures = [generate_pdf(task) for task in tasks]
+                for result_future in asyncio.as_completed(pdf_gen_futures):
+                    index, title, success = await result_future
                     if success:
                         success_count += 1
                         pbar.set_postfix_str(f"Last: {title[:30]}...", refresh=False)
                     else:
-                        failed_count += 1 # Increment failed page count
-                        failed_urls.append((index, title))
-
+                        failed_count += 1
                     pbar.update(1)
 
+
+            # Cleanup page pool - IMPORTANT: Ensure pages are closed.
+            while not page_queue.empty():
+                page = await page_queue.get_nowait()
+                await page.close()
             await browser.close()
 
-        successful = [(i, t) for i, t, success in results if success]
-        if successful:
-            merge_pdfs(successful, output_path, temp_dir)
+        successful_pdf_tasks = [(i, t) for i, t, success in [(await f) for f in pdf_gen_futures] if success]
+
+        if successful_pdf_tasks:
+            merge_pdfs(successful_pdf_tasks, output_path, temp_dir)
             current_process['output_file'] = output_path
 
-            # Save PDF info to database after successful merge
             save_pdf_info_to_db(
                 filename=current_process['output_filename'],
                 filepath=current_process['output_file'],
                 download_url=f"/download?filename={current_process['output_filename']}",
                 website_url=url,
-                total_links_crawled=len(urls), # total_links_crawled
-                successful_pages=success_count, # successful_pages
-                failed_pages=failed_count # failed_pages
+                total_links_crawled=total_crawled_links,
+                successful_pages=success_count,
+                failed_pages=failed_count
             )
-
         else:
             raise Exception("No pages converted successfully!")
 
     finally:
-        end_time = time.time() # End time for stats
+        end_time = time.time()
         conversion_duration = end_time - start_time
-        logging.info(f"Conversion for {url} took {conversion_duration:.2f} seconds. Successful pages: {success_count}, Failed pages: {failed_count}, Total Links Crawled: {len(urls)}")
+        logging.info(f"Conversion for {url} took {conversion_duration:.2f} seconds. Successful: {success_count}, Failed: {failed_count}, Total Links: {total_crawled_links}")
 
+        # Robust temp directory cleanup even on errors
         for file in temp_dir.glob("*.pdf"):
             try:
                 file.unlink()
-            except:
-                pass
+            except OSError as e:
+                logging.error(f"Error deleting temp PDF file: {file} - {e}")
         try:
             temp_dir.rmdir()
-        except:
-            pass
+        except OSError as e:
+            logging.error(f"Error removing temp directory: {temp_dir} - {e}")
 
+
+# --- Quart Routes ---
 @app.route('/')
 async def index():
     pdf_files = get_pdf_files_from_db()
-    return await render_template('index.html', pdf_files=pdf_files) # Pass pdf_files to template
+    return await render_template('index.html', pdf_files=pdf_files)
 
 @app.route('/convert', methods=['POST'])
 async def convert():
@@ -400,21 +418,19 @@ async def convert():
 
     filename_input = data.get('filename', 'output')
     filename = secure_filename(filename_input)
-    if not filename:
-        filename = 'output'
-    output_filename = f"{filename}.pdf"
+    output_filename = f"{filename}.pdf" if filename else 'output.pdf'
     output_path = os.path.join(OUTPUT_DIR, output_filename)
 
     current_process['output_filename'] = output_filename
     current_process['output_file'] = output_path
 
-    async def run():
+    async def run_background_conversion(): # Renamed for clarity
         try:
-            await current_process['messages'].put({'type': 'crawling_start'}) # Indicate crawling start
+            await current_process['messages'].put({'type': 'crawling_start'})
             await run_conversion(
                 url=data['url'],
                 max_depth=int(data['depth']),
-                workers=int(data['workers']),
+                workers=int(data['workers']), # Workers parameter not directly used in PDF gen currently, kept for future use/config
                 output_path=output_path
             )
 
@@ -426,67 +442,43 @@ async def convert():
             else:
                 current_process['generated_files'] = []
 
-            await current_process['messages'].put({'type': 'complete', 'files': current_process['generated_files'], 'crawled_urls': current_process['crawled_urls']}) # Send crawled URLs on complete
+            await current_process['messages'].put({'type': 'complete', 'files': current_process['generated_files'], 'crawled_urls': current_process['crawled_urls']})
 
         except Exception as e:
             await current_process['messages'].put({'type': 'error', 'message': str(e)})
         finally:
             current_process['active'] = False
 
-    asyncio.create_task(run())
+    asyncio.create_task(run_background_conversion()) # Start background task
     return jsonify({"status": "started"})
 
 @app.route('/progress')
 async def progress():
     @stream_with_context
     async def generate():
-        try:
-            yield f"data: {json.dumps({'type': 'crawling_urls_init'})}\n\n" # Initial signal to clear crawled URL table on frontend
-            while True:
-                try:
-                    message = await asyncio.wait_for(
-                        current_process['messages'].get(),
-                        timeout=0.5
-                    )
-                except asyncio.TimeoutError:
-                    yield ": keep-alive\n\n"
-                    continue
+        yield f"data: {json.dumps({'type': 'crawling_urls_init'})}\n\n"
+        while True:
+            try:
+                message = await asyncio.wait_for(current_process['messages'].get(), timeout=0.5)
+            except asyncio.TimeoutError:
+                yield ": keep-alive\n\n"
+                continue
 
-                if message['type'] == 'progress':
-                    yield f"data: {json.dumps(message)}\n\n"
-                elif message['type'] == 'message':
-                    yield f"data: {json.dumps({'type': 'message', 'message': message['message']})}\n\n"
-                elif message['type'] == 'crawling_start':
-                    yield f"data: {json.dumps({'type': 'crawling_start'})}\n\n" # Signal crawling started
-                elif message['type'] == 'complete':
-                    message['crawled_urls'] = current_process['crawled_urls'] # Add crawled URLs to complete message
-                    yield f"data: {json.dumps(message)}\n\n"
-                    return
-                elif message['type'] == 'error':
-                    yield f"data: {json.dumps(message)}\n\n"
-                    return
-        except Exception as e:
-            logging.error(f"Error in /progress SSE stream: {e}")
-            yield f"data: {json.dumps({'type': 'error', 'message': 'SSE stream error'})}\n\n"
+            yield f"data: {json.dumps(message)}\n\n"
+            if message['type'] in ['complete', 'error']:
+                return # End stream on completion or error
 
     return Response(generate(), mimetype='text/event-stream')
 
 @app.route('/files')
 async def list_files():
     pdf_files = get_pdf_files_from_db()
-    files_list = []
-    for file_data in pdf_files:
-        filename, download_url, website_url, conversion_timestamp, total_links_crawled, successful_pages, failed_pages = file_data
-        files_list.append({
-            'filename': filename,
-            'download_url': download_url,
-            'website_url': website_url,
-            'conversion_timestamp': conversion_timestamp,
-            'total_links_crawled': total_links_crawled,
-            'successful_pages': successful_pages,
-            'failed_pages': failed_pages
-        })
-    return jsonify({'files': files_list}) # Return extended file info
+    files_list = [{
+        'filename': filename, 'download_url': download_url, 'website_url': website_url,
+        'conversion_timestamp': conversion_timestamp, 'total_links_crawled': total_links_crawled,
+        'successful_pages': successful_pages, 'failed_pages': failed_pages
+    } for filename, download_url, website_url, conversion_timestamp, total_links_crawled, successful_pages, failed_pages in pdf_files]
+    return jsonify({'files': files_list})
 
 @app.route('/download')
 async def download():
@@ -495,19 +487,15 @@ async def download():
         return jsonify({"status": "error", "message": "Filename not provided"}), 400
 
     output_file_path = os.path.join(OUTPUT_DIR, filename)
-
     if not os.path.exists(output_file_path):
         return jsonify({"status": "error", "message": "File not found"}), 404
 
-    response = await send_file(
-        output_file_path,
-        as_attachment=True
-    )
-    response.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
+    response = await send_file(output_file_path, as_attachment=True, download_name=filename) # download_name for cleaner filenames
     return response
 
-# Netlify Function Handler
+# --- ASGI App for Netlify ---
 asgi_app = WsgiToAsgi(app)
 
+# --- Main Execution ---
 if __name__ == "__main__":
     app.run(debug=True)
