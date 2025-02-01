@@ -22,7 +22,7 @@ from werkzeug.utils import secure_filename
 from asgiref.wsgi import WsgiToAsgi
 
 # --- Setup and Configuration ---
-logging.basicConfig(filename='/tmp/crawler.log', level=logging.ERROR)
+logging.basicConfig(filename='/tmp/crawler.log', level=logging.ERROR) # Keeping ERROR for now, might want to temporarily change to DEBUG for more info
 app = Quart(__name__)
 app.config['TEMPLATES_AUTO_RELOAD'] = True
 
@@ -35,21 +35,26 @@ def init_db():
     """Initializes the SQLite database if it doesn't exist."""
     conn = sqlite3.connect(DATABASE_PATH)
     cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS pdf_files (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            filename TEXT UNIQUE NOT NULL,
-            filepath TEXT NOT NULL,
-            download_url TEXT NOT NULL,
-            website_url TEXT NOT NULL,
-            conversion_timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            total_links_crawled INTEGER,
-            successful_pages INTEGER,
-            failed_pages INTEGER
-        )
-    ''')
-    conn.commit()
-    conn.close()
+    try:
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS pdf_files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                filename TEXT UNIQUE NOT NULL,
+                filepath TEXT NOT NULL,
+                download_url TEXT NOT NULL,
+                website_url TEXT NOT NULL,
+                conversion_timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                total_links_crawled INTEGER,
+                successful_pages INTEGER,
+                failed_pages INTEGER
+            )
+        ''')
+        conn.commit()
+        logging.info("Database initialized or already exists.") # Added log
+    except Exception as e:
+        logging.error(f"Database initialization error: {e}") # More specific error log
+    finally:
+        conn.close()
 
 init_db()
 
@@ -73,25 +78,31 @@ class TqdmToQueue(tqdm):
 
     def display(self, msg=None, pos=None):
         super().display(msg, pos)
-        asyncio.run_coroutine_threadsafe(
-            self.queue.put({
-                'type': 'progress',
-                'current': self.n,
-                'total': self.total,
-                'message': msg if msg else self.desc
-            }),
-            loop=asyncio.get_event_loop()
-        )
+        try: # Added try-except for queue put operations
+            asyncio.run_coroutine_threadsafe(
+                self.queue.put({
+                    'type': 'progress',
+                    'current': self.n,
+                    'total': self.total,
+                    'message': msg if msg else self.desc
+                }),
+                loop=asyncio.get_event_loop()
+            )
+        except Exception as e:
+            logging.error(f"Error putting progress to queue: {e}")
 
     def write(self, s, file=None, end="\n"):
         msg = s + end
-        asyncio.run_coroutine_threadsafe(
-            self.queue.put({
-                'type': 'message',
-                'message': msg.strip()
-            }),
-            loop=asyncio.get_event_loop()
-        )
+        try: # Added try-except for queue put operations
+            asyncio.run_coroutine_threadsafe(
+                self.queue.put({
+                    'type': 'message',
+                    'message': msg.strip()
+                }),
+                loop=asyncio.get_event_loop()
+            )
+        except Exception as e:
+            logging.error(f"Error putting message to queue: {e}")
 
 # --- Crawler Class ---
 class Crawler:
@@ -292,14 +303,19 @@ def save_pdf_info_to_db(filename, filepath, download_url, website_url, total_lin
     conn = sqlite3.connect(DATABASE_PATH)
     cursor = conn.cursor()
     try:
+        logging.debug(f"Saving PDF info to DB - Filename: {filename}, Website: {website_url}") # Log before insert
         cursor.execute('''
             INSERT INTO pdf_files (filename, filepath, download_url, website_url, total_links_crawled, successful_pages, failed_pages)
             VALUES (?, ?, ?, ?, ?, ?, ?)
         ''', (filename, filepath, download_url, website_url, total_links_crawled, successful_pages, failed_pages))
         conn.commit()
+        logging.info(f"PDF info saved to DB for: {filename}") # Log on successful insert
     except sqlite3.IntegrityError:
-        logging.warning(f"PDF info for filename '{filename}' already exists.")
+        logging.warning(f"PDF info for filename '{filename}' already exists. Skipping save.") # Keep IntegrityError log
         conn.rollback()
+    except Exception as e:
+        logging.error(f"Error saving PDF info to DB: {e}") # Catch other potential DB errors
+        conn.rollback() # Rollback on any error to ensure data consistency
     finally:
         conn.close()
 
@@ -307,11 +323,17 @@ def get_pdf_files_from_db():
     """Retrieves PDF file information from the database."""
     conn = sqlite3.connect(DATABASE_PATH)
     cursor = conn.cursor()
-    cursor.execute('''SELECT filename, download_url, website_url, conversion_timestamp, total_links_crawled, successful_pages, failed_pages
-                      FROM pdf_files ORDER BY conversion_timestamp DESC''')
-    files = cursor.fetchall()
-    conn.close()
-    return files
+    try:
+        cursor.execute('''SELECT filename, download_url, website_url, conversion_timestamp, total_links_crawled, successful_pages, failed_pages
+                          FROM pdf_files ORDER BY conversion_timestamp DESC''')
+        files = cursor.fetchall()
+        logging.debug(f"Retrieved {len(files)} PDF files from DB.") # Log how many files retrieved
+        return files
+    except Exception as e:
+        logging.error(f"Error retrieving PDF files from DB: {e}") # Log on retrieval error
+        return [] # Return empty list in case of error
+    finally:
+        conn.close()
 
 # --- Main Conversion Orchestration ---
 async def run_conversion(url: str, max_depth: int, workers: int, output_path: str):
@@ -367,6 +389,8 @@ async def run_conversion(url: str, max_depth: int, workers: int, output_path: st
             merge_pdfs(successful_pdf_tasks, output_path, temp_dir)
             current_process['output_file'] = output_path
 
+
+            logging.debug("Preparing to save PDF info...") # Log before save_pdf_info_to_db call
             save_pdf_info_to_db(
                 filename=current_process['output_filename'],
                 filepath=current_process['output_file'],
@@ -376,6 +400,7 @@ async def run_conversion(url: str, max_depth: int, workers: int, output_path: st
                 successful_pages=success_count,
                 failed_pages=failed_count
             )
+            logging.debug("save_pdf_info_to_db call completed.") # Log after save_pdf_info_to_db call
         else:
             raise Exception("No pages converted successfully!")
 
