@@ -291,7 +291,7 @@ async def generate_pdf_version(html_path, pdf_path):
 def compress_pdf(input_pdf, output_pdf):
     try:
         with pikepdf.open(input_pdf) as pdf:
-            pdf.save(output_pdf, optimize_pdf=True)
+            pdf.save(output_pdf, compress_streams=True)
         return True
     except Exception as e:
         logging.exception(f"Error compressing PDF: {e}")
@@ -486,9 +486,14 @@ def build_jobs_table(jobs):
       <th>URL Count</th><th>HTML</th><th>Original PDF</th><th>Compressed PDF</th><th>Drive Link</th><th>Action</th>
     </tr></thead><tbody>"""
     for job in jobs:
-        # Unpack job with new "compressed_pdf" field.
-        (job_id, job_name, start_time, finish_time, url_count, html_file, pdf_file,
-         compressed_pdf, drive_link, drive_token, status) = job
+        # If the row has 10 columns (old schema), set compressed_pdf to an empty string.
+        if len(job) == 10:
+            (job_id, job_name, start_time, finish_time, url_count, html_file, pdf_file,
+             drive_link, drive_token, status) = job
+            compressed_pdf = ""
+        else:
+            (job_id, job_name, start_time, finish_time, url_count, html_file, pdf_file,
+             compressed_pdf, drive_link, drive_token, status) = job
         html_dl = f'<a href="/download/{html_file}" class="btn btn-success btn-sm" download>HTML</a>' if html_file else ""
         pdf_dl = f'<a href="/download/{pdf_file}" class="btn btn-primary btn-sm" download>PDF</a>' if pdf_file else ""
         comp_dl = f'<a href="/download/{compressed_pdf}" class="btn btn-secondary btn-sm" download>Compressed PDF</a>' if compressed_pdf else ""
@@ -736,7 +741,7 @@ async def main_scraping(root_url, workers, max_depth, chunk_size, job_id):
         await generate_pdf_version(final_html_path, pdf_path)
         progress["pdf_filename"] = pdf_filename
         
-        # Compress the generated PDF using pikepdf
+        # Compress the generated PDF using pikepdf with compress_streams=True
         compressed_pdf_filename = f"{sanitize_filename(base_domain)}_book_compressed.pdf"
         compressed_pdf_path = os.path.join(html_dir, compressed_pdf_filename)
         if compress_pdf(pdf_path, compressed_pdf_path):
