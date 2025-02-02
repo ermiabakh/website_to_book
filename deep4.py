@@ -619,7 +619,7 @@ def upload(job_id):
     }
     flow = InstalledAppFlow.from_client_config(client_config, SCOPES)
     # Pass redirect_uri explicitly when generating the authorization URL
-    auth_url, state = flow.authorization_url(prompt="consent", access_type="offline", redirect_uri=redirect_uri)
+    auth_url, state = flow.authorization_url(prompt="consent", access_type="offline")
     with open("oauth_state.txt", "w") as f:
         f.write(f"{state}:{job_id}")
     return redirect(auth_url)
