@@ -20,6 +20,13 @@ import psutil
 from playwright.async_api import async_playwright
 from threading import Event
 
+# Import pikepdf for PDF compression
+try:
+    import pikepdf
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "pikepdf"])
+    import pikepdf
+
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -46,7 +53,8 @@ def auto_install_dependencies():
         "flask": "flask",
         "bs4": "bs4",
         "playwright": "playwright",
-        "psutil": "psutil"
+        "psutil": "psutil",
+        "pikepdf": "pikepdf"
     }
     for mod, pkg in packages.items():
         try:
@@ -77,6 +85,7 @@ console_handler.setFormatter(console_formatter)
 logger.addHandler(console_handler)
 
 # --- SQLite Database Setup ---
+# Updated schema to include "compressed_pdf" column.
 DB_FILENAME = "jobs.db"
 
 def init_db():
@@ -90,6 +99,7 @@ def init_db():
         url_count INTEGER,
         html_file TEXT,
         pdf_file TEXT,
+        compressed_pdf TEXT,
         drive_link TEXT,
         drive_token TEXT,
         status TEXT
@@ -135,7 +145,8 @@ progress = {
     "error": "",
     "final_html": "",
     "pdf_filename": "",
-    "timeline": []  # Timeline messages to be shown in UI
+    "compressed_pdf": "",
+    "timeline": []  # Timeline messages for UI
 }
 html_pages = []  # Holds downloaded page info
 
@@ -276,6 +287,16 @@ async def generate_pdf_version(html_path, pdf_path):
         await page.pdf(path=pdf_path, format="A4")
         await browser.close()
 
+# --- Helper: Compress PDF using pikepdf ---
+def compress_pdf(input_pdf, output_pdf):
+    try:
+        with pikepdf.open(input_pdf) as pdf:
+            pdf.save(output_pdf, optimize_pdf=True)
+        return True
+    except Exception as e:
+        logging.exception(f"Error compressing PDF: {e}")
+        return False
+
 # --- Flask HTML Template ---
 HTML_TEMPLATE = """
 <!doctype html>
@@ -352,6 +373,11 @@ HTML_TEMPLATE = """
               dlPdf.href = "/download/" + data.pdf_filename;
               dlPdf.style.display = "inline-block";
             }
+            if(data.compressed_pdf){
+              var dlComp = document.getElementById('downloadLinkCompressedPdf');
+              dlComp.href = "/download/" + data.compressed_pdf;
+              dlComp.style.display = "inline-block";
+            }
             if(data.error){
               var errDiv = document.getElementById('error');
               errDiv.innerText = data.error;
@@ -419,7 +445,8 @@ HTML_TEMPLATE = """
           <div id="progressBar" class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 0%;">0%</div>
         </div>
         <a id="downloadLinkHtml" href="#" class="btn btn-success" style="display: none;" download>Download Final HTML</a>
-        <a id="downloadLinkPdf" href="#" class="btn btn-primary" style="display: none;" download>Download PDF Version</a>
+        <a id="downloadLinkPdf" href="#" class="btn btn-primary" style="display: none;" download>Download Original PDF</a>
+        <a id="downloadLinkCompressedPdf" href="#" class="btn btn-secondary" style="display: none;" download>Download Compressed PDF</a>
       </div>
       <div class="card mb-3">
         <div class="card-header">Timeline</div>
@@ -452,20 +479,24 @@ def jobs():
     return build_jobs_table(jobs)
 
 def build_jobs_table(jobs):
+    # Updated table to include "Compressed PDF" column.
     table_html = """<table class="table table-striped">
     <thead><tr>
       <th>ID</th><th>Job Name</th><th>Start Time</th><th>Finish Time</th>
-      <th>URL Count</th><th>HTML</th><th>PDF</th><th>Drive Link</th><th>Action</th>
+      <th>URL Count</th><th>HTML</th><th>Original PDF</th><th>Compressed PDF</th><th>Drive Link</th><th>Action</th>
     </tr></thead><tbody>"""
     for job in jobs:
-        job_id, job_name, start_time, finish_time, url_count, html_file, pdf_file, drive_link, drive_token, status = job
+        # Unpack job with new "compressed_pdf" field.
+        (job_id, job_name, start_time, finish_time, url_count, html_file, pdf_file,
+         compressed_pdf, drive_link, drive_token, status) = job
         html_dl = f'<a href="/download/{html_file}" class="btn btn-success btn-sm" download>HTML</a>' if html_file else ""
         pdf_dl = f'<a href="/download/{pdf_file}" class="btn btn-primary btn-sm" download>PDF</a>' if pdf_file else ""
+        comp_dl = f'<a href="/download/{compressed_pdf}" class="btn btn-secondary btn-sm" download>Compressed PDF</a>' if compressed_pdf else ""
         drive_dl = f'<a href="{drive_link}" target="_blank" class="btn btn-info btn-sm">Drive</a>' if drive_link else "Not Uploaded"
         action_btn = ""
         if not drive_link and html_file:
             action_btn = f'<a href="/upload/{job_id}" class="btn btn-warning btn-sm">Upload to Drive</a>'
-        table_html += f"<tr><td>{job_id}</td><td>{job_name}</td><td>{start_time}</td><td>{finish_time or ''}</td><td>{url_count or 0}</td><td>{html_dl}</td><td>{pdf_dl}</td><td>{drive_dl}</td><td>{action_btn}</td></tr>"
+        table_html += f"<tr><td>{job_id}</td><td>{job_name}</td><td>{start_time}</td><td>{finish_time or ''}</td><td>{url_count or 0}</td><td>{html_dl}</td><td>{pdf_dl}</td><td>{comp_dl}</td><td>{drive_dl}</td><td>{action_btn}</td></tr>"
     table_html += "</tbody></table>"
     return table_html
 
@@ -498,6 +529,7 @@ def start():
         "error": "",
         "final_html": "",
         "pdf_filename": "",
+        "compressed_pdf": "",
         "timeline": []
     })
     add_timeline("Job started. Initializing...")
@@ -704,13 +736,22 @@ async def main_scraping(root_url, workers, max_depth, chunk_size, job_id):
         await generate_pdf_version(final_html_path, pdf_path)
         progress["pdf_filename"] = pdf_filename
         
+        # Compress the generated PDF using pikepdf
+        compressed_pdf_filename = f"{sanitize_filename(base_domain)}_book_compressed.pdf"
+        compressed_pdf_path = os.path.join(html_dir, compressed_pdf_filename)
+        if compress_pdf(pdf_path, compressed_pdf_path):
+            progress["compressed_pdf"] = compressed_pdf_filename
+            add_timeline("Compressed PDF generated.")
+        else:
+            add_timeline("Failed to generate compressed PDF.")
+        
         progress["merged"] = progress["total_urls"]
-        progress["state"] = "Completed. Final HTML, PDF ready."
-        add_timeline("Merging completed. Final HTML and PDF generated.")
-        logging.debug("HTML merging and PDF generation completed successfully.")
+        progress["state"] = "Completed. Final HTML and PDFs ready."
+        add_timeline("Merging completed. Final HTML, original PDF, and compressed PDF generated.")
+        logging.debug("HTML merging, PDF generation, and compression completed successfully.")
         finish_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         update_job(job_id, finish_time=finish_time, url_count=progress["total_urls"],
-                   html_file=final_html_filename, pdf_file=pdf_filename, status="Completed")
+                   html_file=final_html_filename, pdf_file=pdf_filename, compressed_pdf=progress["compressed_pdf"], status="Completed")
     except Exception as e:
         progress["state"] = "Error during merging/PDF generation"
         progress["error"] = str(e)
