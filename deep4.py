@@ -20,12 +20,9 @@ import psutil
 from playwright.async_api import async_playwright
 from threading import Event
 
-# Import pikepdf for PDF compression
-try:
-    import pikepdf
-except ImportError:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "pikepdf"])
-    import pikepdf
+# Use Ghostscript for PDF compression.
+# Ensure that Ghostscript is installed and available as "gs" on your system.
+# You can install Ghostscript from: https://www.ghostscript.com/
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -53,8 +50,7 @@ def auto_install_dependencies():
         "flask": "flask",
         "bs4": "bs4",
         "playwright": "playwright",
-        "psutil": "psutil",
-        "pikepdf": "pikepdf"
+        "psutil": "psutil"
     }
     for mod, pkg in packages.items():
         try:
@@ -287,14 +283,29 @@ async def generate_pdf_version(html_path, pdf_path):
         await page.pdf(path=pdf_path, format="A4")
         await browser.close()
 
-# --- Helper: Compress PDF using pikepdf ---
+# --- Helper: Compress PDF using Ghostscript ---
 def compress_pdf(input_pdf, output_pdf):
+    gs_command = shutil.which("gs")
+    if gs_command is None:
+        logging.error("Ghostscript not found. Please install Ghostscript for PDF compression.")
+        return False
+    # Use the /ebook setting for a good balance of quality and compression.
+    cmd = [
+        gs_command,
+        "-sDEVICE=pdfwrite",
+        "-dCompatibilityLevel=1.4",
+        "-dPDFSETTINGS=/ebook",
+        "-dNOPAUSE",
+        "-dQUIET",
+        "-dBATCH",
+        f"-sOutputFile={output_pdf}",
+        input_pdf
+    ]
     try:
-        with pikepdf.open(input_pdf) as pdf:
-            pdf.save(output_pdf, compress_streams=True)
+        subprocess.check_call(cmd)
         return True
-    except Exception as e:
-        logging.exception(f"Error compressing PDF: {e}")
+    except subprocess.CalledProcessError as e:
+        logging.exception(f"Ghostscript compression error: {e}")
         return False
 
 # --- Flask HTML Template ---
@@ -741,7 +752,7 @@ async def main_scraping(root_url, workers, max_depth, chunk_size, job_id):
         await generate_pdf_version(final_html_path, pdf_path)
         progress["pdf_filename"] = pdf_filename
         
-        # Compress the generated PDF using pikepdf with compress_streams=True
+        # Compress the generated PDF using Ghostscript
         compressed_pdf_filename = f"{sanitize_filename(base_domain)}_book_compressed.pdf"
         compressed_pdf_path = os.path.join(html_dir, compressed_pdf_filename)
         if compress_pdf(pdf_path, compressed_pdf_path):
