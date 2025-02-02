@@ -21,9 +21,7 @@ from playwright.async_api import async_playwright
 from threading import Event
 
 # Use Ghostscript for PDF compression.
-# Ensure that Ghostscript is installed and available as "gs" on your system.
-# You can install Ghostscript from: https://www.ghostscript.com/
-
+# Ensure Ghostscript is installed and available as "gs" on your system.
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -81,7 +79,6 @@ console_handler.setFormatter(console_formatter)
 logger.addHandler(console_handler)
 
 # --- SQLite Database Setup ---
-# Updated schema to include "compressed_pdf" column.
 DB_FILENAME = "jobs.db"
 
 def init_db():
@@ -157,7 +154,7 @@ GOOGLE_CLIENT_CONFIG = {
     "installed": {
         "client_id": client_id,
         "client_secret": client_secret,
-        "redirect_uris": ["http://localhost:9999/oauth2callback"],
+        "redirect_uris": [],  # We'll set this dynamically
         "auth_uri": "https://accounts.google.com/o/oauth2/auth",
         "token_uri": "https://oauth2.googleapis.com/token"
     }
@@ -289,7 +286,6 @@ def compress_pdf(input_pdf, output_pdf):
     if gs_command is None:
         logging.error("Ghostscript not found. Please install Ghostscript for PDF compression.")
         return False
-    # Use the /ebook setting for a good balance of quality and compression.
     cmd = [
         gs_command,
         "-sDEVICE=pdfwrite",
@@ -490,14 +486,12 @@ def jobs():
     return build_jobs_table(jobs)
 
 def build_jobs_table(jobs):
-    # Updated table to include "Compressed PDF" column.
     table_html = """<table class="table table-striped">
     <thead><tr>
       <th>ID</th><th>Job Name</th><th>Start Time</th><th>Finish Time</th>
       <th>URL Count</th><th>HTML</th><th>Original PDF</th><th>Compressed PDF</th><th>Drive Link</th><th>Action</th>
     </tr></thead><tbody>"""
     for job in jobs:
-        # If the row has 10 columns (old schema), set compressed_pdf to an empty string.
         if len(job) == 10:
             (job_id, job_name, start_time, finish_time, url_count, html_file, pdf_file,
              drive_link, drive_token, status) = job
@@ -536,7 +530,6 @@ def start():
     start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     job_id = insert_job(job_name, start_time, "Started")
     
-    # Reset progress, timeline, and control events
     progress.update({
         "total_urls": 0,
         "downloaded": 0,
@@ -552,12 +545,10 @@ def start():
     global html_pages
     html_pages = []
     resource_cache.clear()
-    # Clear temp folder if exists
     if os.path.exists("temp_html"):
         shutil.rmtree("temp_html")
     os.makedirs("temp_html", exist_ok=True)
     
-    # Reset control events
     job_pause_event.clear()
     job_cancel_event.clear()
     
@@ -583,7 +574,6 @@ def cancel():
     job_cancel_event.set()
     progress["state"] = "Cancelled"
     add_timeline("Job cancelled by user.")
-    # Clean up temporary directories and caches
     try:
         if os.path.exists("temp_html"):
             shutil.rmtree("temp_html")
@@ -615,8 +605,10 @@ def upload(job_id):
     html_file, drive_link = row
     if drive_link:
         return redirect(drive_link)
+    # Build the redirect URI from the current request
     redirect_uri = request.host_url.rstrip("/") + "/oauth2callback"
-    config = {
+    # Set the redirect URI in the client config
+    client_config = {
         "installed": {
             "client_id": GOOGLE_CLIENT_CONFIG["installed"]["client_id"],
             "client_secret": GOOGLE_CLIENT_CONFIG["installed"]["client_secret"],
@@ -625,8 +617,9 @@ def upload(job_id):
             "token_uri": GOOGLE_CLIENT_CONFIG["installed"]["token_uri"]
         }
     }
-    flow = InstalledAppFlow.from_client_config(config, SCOPES)
-    auth_url, state = flow.authorization_url(prompt="consent", access_type="offline")
+    flow = InstalledAppFlow.from_client_config(client_config, SCOPES)
+    # Pass redirect_uri explicitly when generating the authorization URL
+    auth_url, state = flow.authorization_url(prompt="consent", access_type="offline", redirect_uri=redirect_uri)
     with open("oauth_state.txt", "w") as f:
         f.write(f"{state}:{job_id}")
     return redirect(auth_url)
@@ -647,7 +640,7 @@ def oauth2callback():
         logging.error("State mismatch in OAuth callback.")
         return "State mismatch.", 400
     redirect_uri = request.host_url.rstrip("/") + "/oauth2callback"
-    config = {
+    client_config = {
         "installed": {
             "client_id": GOOGLE_CLIENT_CONFIG["installed"]["client_id"],
             "client_secret": GOOGLE_CLIENT_CONFIG["installed"]["client_secret"],
@@ -656,7 +649,9 @@ def oauth2callback():
             "token_uri": GOOGLE_CLIENT_CONFIG["installed"]["token_uri"]
         }
     }
-    flow = InstalledAppFlow.from_client_config(config, SCOPES, state=state_code)
+    flow = InstalledAppFlow.from_client_config(client_config, SCOPES, state=state_code)
+    # Set the redirect URI on the flow
+    flow.redirect_uri = redirect_uri
     flow.fetch_token(code=code)
     credentials = flow.credentials
     drive_service = build("drive", "v3", credentials=credentials)
@@ -752,7 +747,6 @@ async def main_scraping(root_url, workers, max_depth, chunk_size, job_id):
         await generate_pdf_version(final_html_path, pdf_path)
         progress["pdf_filename"] = pdf_filename
         
-        # Compress the generated PDF using Ghostscript
         compressed_pdf_filename = f"{sanitize_filename(base_domain)}_book_compressed.pdf"
         compressed_pdf_path = os.path.join(html_dir, compressed_pdf_filename)
         if compress_pdf(pdf_path, compressed_pdf_path):
