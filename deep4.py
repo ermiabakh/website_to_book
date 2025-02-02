@@ -11,15 +11,16 @@ import sqlite3
 import requests
 import base64
 import mimetypes
+import shutil
 from datetime import datetime
 from urllib.parse import urlparse, urljoin
 from flask import Flask, render_template_string, request, jsonify, send_from_directory, redirect
 from bs4 import BeautifulSoup
 import psutil
 from playwright.async_api import async_playwright
+from threading import Event
 
 from dotenv import load_dotenv
-
 load_dotenv()
 
 client_id = os.getenv('GOOGLE_OAUTH_CLIENT_ID')
@@ -61,17 +62,14 @@ def auto_install_dependencies():
 auto_install_dependencies()
 
 # --- Global Configuration & Logging ---
-# Set up logger to output to both file and console
 logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
 
-# File handler
 file_handler = logging.FileHandler("app.log", mode="a")
 file_formatter = logging.Formatter('%(asctime)s %(levelname)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 file_handler.setFormatter(file_formatter)
 logger.addHandler(file_handler)
 
-# Console handler
 console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.DEBUG)
 console_formatter = logging.Formatter('%(asctime)s %(levelname)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
@@ -136,17 +134,13 @@ progress = {
     "state": "Idle",
     "error": "",
     "final_html": "",
-    "pdf_filename": ""
+    "pdf_filename": "",
+    "timeline": []  # Timeline messages to be shown in UI
 }
-html_pages = []  # List to hold page info
+html_pages = []  # Holds downloaded page info
 
-# Global cache for resources
 resource_cache = {}
-
-# Domains to skip (e.g., ad servers)
 DISALLOWED_DOMAINS = ["googleads.g.doubleclick.net"]
-
-# Default headers for requests.
 DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.0.0 Safari/537.36"
 }
@@ -162,6 +156,26 @@ GOOGLE_CLIENT_CONFIG = {
     }
 }
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+
+# --- Job Control Events ---
+job_pause_event = Event()   # When set, job is paused.
+job_cancel_event = Event()  # When set, job should cancel.
+
+# --- Helper function to add timeline messages ---
+def add_timeline(message):
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    msg = f"[{timestamp}] {message}"
+    progress["timeline"].append(msg)
+    if len(progress["timeline"]) > 100:
+        progress["timeline"] = progress["timeline"][-100:]
+    logging.debug(msg)
+
+# --- Async helper to wait if job is paused ---
+async def wait_if_paused():
+    while job_pause_event.is_set():
+        await asyncio.sleep(1)
+        if job_cancel_event.is_set():
+            raise Exception("Job Cancelled")
 
 # --- Helper: Check if URL is valid for crawling ---
 def is_valid_url(url):
@@ -182,6 +196,7 @@ def is_valid_url(url):
 # --- Helper: Auto-scroll for dynamic pages ---
 async def auto_scroll(page, scroll_delay=100, max_scrolls=50):
     for i in range(max_scrolls):
+        await wait_if_paused()
         prev_height = await page.evaluate("document.body.scrollHeight")
         await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
         await page.wait_for_timeout(scroll_delay)
@@ -256,6 +271,7 @@ async def generate_pdf_version(html_path, pdf_path):
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context()
         page = await context.new_page()
+        await wait_if_paused()
         await page.goto(file_url, timeout=60000)
         await page.pdf(path=pdf_path, format="A4")
         await browser.close()
@@ -276,6 +292,7 @@ HTML_TEMPLATE = """
       .progress { height: 25px; }
       .page-break { margin-top: 2rem; border-top: 2px dashed #ccc; padding-top: 2rem; }
       table { margin-top: 2rem; }
+      #timeline { height: 200px; overflow-y: scroll; background: #fff; border: 1px solid #ccc; padding: 10px; }
     </style>
     <script>
       function startScraping() {
@@ -293,6 +310,21 @@ HTML_TEMPLATE = """
           depth: depth,
           chunk: chunk
         }));
+      }
+      function pauseJob() {
+        var xhr = new XMLHttpRequest();
+        xhr.open("POST", "/pause", true);
+        xhr.send();
+      }
+      function resumeJob() {
+        var xhr = new XMLHttpRequest();
+        xhr.open("POST", "/resume", true);
+        xhr.send();
+      }
+      function cancelJob() {
+        var xhr = new XMLHttpRequest();
+        xhr.open("POST", "/cancel", true);
+        xhr.send();
       }
       function updateProgress() {
         var xhr = new XMLHttpRequest();
@@ -324,6 +356,9 @@ HTML_TEMPLATE = """
               var errDiv = document.getElementById('error');
               errDiv.innerText = data.error;
               errDiv.style.display = "block";
+            }
+            if(data.timeline) {
+              document.getElementById('timeline').innerHTML = data.timeline.join("<br>");
             }
           }
         }
@@ -366,6 +401,9 @@ HTML_TEMPLATE = """
               <input type="number" id="chunk" name="chunk" value="5" min="1" class="form-control" required/>
             </div>
             <button type="submit" class="btn btn-primary">Start</button>
+            <button type="button" class="btn btn-warning" onclick="pauseJob()">Pause</button>
+            <button type="button" class="btn btn-success" onclick="resumeJob()">Resume</button>
+            <button type="button" class="btn btn-danger" onclick="cancelJob()">Cancel</button>
           </form>
         </div>
       </div>
@@ -383,10 +421,15 @@ HTML_TEMPLATE = """
         <a id="downloadLinkHtml" href="#" class="btn btn-success" style="display: none;" download>Download Final HTML</a>
         <a id="downloadLinkPdf" href="#" class="btn btn-primary" style="display: none;" download>Download PDF Version</a>
       </div>
+      <div class="card mb-3">
+        <div class="card-header">Timeline</div>
+        <div class="card-body" id="timeline"></div>
+      </div>
       <h3>Previous Jobs</h3>
       <div id="jobsTable">
         {{ jobs_table|safe }}
       </div>
+      <div id="error" class="alert alert-danger" style="display: none;"></div>
     </div>
     <!-- Bootstrap 5 JS (optional) -->
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
@@ -446,6 +489,7 @@ def start():
     start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     job_id = insert_job(job_name, start_time, "Started")
     
+    # Reset progress, timeline, and control events
     progress.update({
         "total_urls": 0,
         "downloaded": 0,
@@ -453,13 +497,54 @@ def start():
         "state": "Starting",
         "error": "",
         "final_html": "",
-        "pdf_filename": ""
+        "pdf_filename": "",
+        "timeline": []
     })
+    add_timeline("Job started. Initializing...")
     global html_pages
     html_pages = []
+    resource_cache.clear()
+    # Clear temp folder if exists
+    if os.path.exists("temp_html"):
+        shutil.rmtree("temp_html")
+    os.makedirs("temp_html", exist_ok=True)
+    
+    # Reset control events
+    job_pause_event.clear()
+    job_cancel_event.clear()
     
     threading.Thread(target=run_scraping, args=(url, workers, depth, chunk_size, job_id), daemon=True).start()
     return jsonify({"status": "started"})
+
+@app.route("/pause", methods=["POST"])
+def pause():
+    job_pause_event.set()
+    progress["state"] = "Paused"
+    add_timeline("Job paused by user.")
+    return jsonify({"status": "paused"})
+
+@app.route("/resume", methods=["POST"])
+def resume():
+    job_pause_event.clear()
+    progress["state"] = "Resumed"
+    add_timeline("Job resumed by user.")
+    return jsonify({"status": "resumed"})
+
+@app.route("/cancel", methods=["POST"])
+def cancel():
+    job_cancel_event.set()
+    progress["state"] = "Cancelled"
+    add_timeline("Job cancelled by user.")
+    # Clean up temporary directories and caches
+    try:
+        if os.path.exists("temp_html"):
+            shutil.rmtree("temp_html")
+        resource_cache.clear()
+        global html_pages
+        html_pages = []
+    except Exception as e:
+        logging.exception("Error during cleanup on cancel:")
+    return jsonify({"status": "cancelled"})
 
 @app.route("/progress")
 def get_progress():
@@ -552,6 +637,7 @@ def run_scraping(root_url, workers, max_depth, chunk_size, job_id):
     except Exception as e:
         progress["state"] = "Fatal Error"
         progress["error"] = str(e)
+        add_timeline(f"Fatal error: {e}")
         logging.exception("Error in run_scraping:")
         update_job(job_id, status="Error")
 
@@ -559,6 +645,8 @@ def run_scraping(root_url, workers, max_depth, chunk_size, job_id):
 async def main_scraping(root_url, workers, max_depth, chunk_size, job_id):
     global progress, html_pages
     progress["state"] = "Initializing"
+    add_timeline("Initializing crawling process...")
+    await wait_if_paused()
     base_domain = get_base_domain(root_url)
     downloads_dir = os.path.join("downloads", sanitize_filename(base_domain))
     os.makedirs(downloads_dir, exist_ok=True)
@@ -568,24 +656,29 @@ async def main_scraping(root_url, workers, max_depth, chunk_size, job_id):
     os.makedirs(temp_html_dir, exist_ok=True)
 
     progress["state"] = "Crawling links"
+    add_timeline("Crawling links...")
     try:
         crawled_urls = await crawl_links(root_url, base_domain, max_depth)
     except Exception as e:
         progress["state"] = "Error during crawling"
         progress["error"] = str(e)
+        add_timeline(f"Error during crawling: {e}")
         logging.exception("Error during crawl_links:")
         update_job(job_id, status="Error")
         return
     progress["total_urls"] = len(crawled_urls)
+    add_timeline(f"Found {len(crawled_urls)} unique URLs.")
     logging.debug(f"Found {len(crawled_urls)} unique URLs.")
 
     progress["state"] = "Downloading HTML pages"
+    add_timeline("Downloading HTML pages...")
     semaphore = asyncio.Semaphore(workers)
     total = len(crawled_urls)
     
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         for start in range(0, total, chunk_size):
+            await wait_if_paused()
             chunk_urls = crawled_urls[start:start+chunk_size]
             tasks = []
             for i, url in enumerate(chunk_urls, start=start):
@@ -599,6 +692,7 @@ async def main_scraping(root_url, workers, max_depth, chunk_size, job_id):
 
     html_pages.sort(key=lambda x: x["order"])
     progress["state"] = "Merging HTML pages"
+    add_timeline("Merging HTML pages...")
     try:
         final_html_filename = f"{sanitize_filename(base_domain)}_book.html"
         final_html_path = os.path.join(html_dir, final_html_filename)
@@ -612,6 +706,7 @@ async def main_scraping(root_url, workers, max_depth, chunk_size, job_id):
         
         progress["merged"] = progress["total_urls"]
         progress["state"] = "Completed. Final HTML, PDF ready."
+        add_timeline("Merging completed. Final HTML and PDF generated.")
         logging.debug("HTML merging and PDF generation completed successfully.")
         finish_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         update_job(job_id, finish_time=finish_time, url_count=progress["total_urls"],
@@ -619,6 +714,7 @@ async def main_scraping(root_url, workers, max_depth, chunk_size, job_id):
     except Exception as e:
         progress["state"] = "Error during merging/PDF generation"
         progress["error"] = str(e)
+        add_timeline(f"Error during merging/PDF generation: {e}")
         logging.exception("Error during merge_html_pages or generate_pdf_version:")
         update_job(job_id, status="Error")
 
@@ -634,6 +730,9 @@ async def crawl_links(root_url, base_domain, max_depth):
         
         async def worker():
             while True:
+                if job_cancel_event.is_set():
+                    break
+                await wait_if_paused()
                 try:
                     current_url, depth = await q.get()
                 except asyncio.CancelledError:
@@ -648,6 +747,7 @@ async def crawl_links(root_url, base_domain, max_depth):
                 visited.add(current_url)
                 try:
                     page = await context.new_page()
+                    await wait_if_paused()
                     await page.goto(current_url, timeout=60000)
                     await auto_scroll(page)
                     await page.wait_for_load_state("networkidle", timeout=60000)
@@ -675,9 +775,11 @@ async def generate_html_task(browser, url, temp_html_dir, semaphore, idx):
     global progress
     result = None
     async with semaphore:
+        await wait_if_paused()
         try:
             context = await browser.new_context()
             page = await context.new_page()
+            await wait_if_paused()
             await page.goto(url, timeout=60000)
             await auto_scroll(page)
             await page.wait_for_load_state("networkidle", timeout=60000)
@@ -696,6 +798,7 @@ async def generate_html_task(browser, url, temp_html_dir, semaphore, idx):
         except Exception as e:
             err = f"Error downloading HTML for {url}: {e}"
             progress["error"] = err
+            add_timeline(err)
             logging.exception(err)
         return result
 
