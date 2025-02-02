@@ -19,13 +19,11 @@ import psutil
 from playwright.async_api import async_playwright
 
 from dotenv import load_dotenv
-import os
 
 load_dotenv()
 
 client_id = os.getenv('GOOGLE_OAUTH_CLIENT_ID')
 client_secret = os.getenv('GOOGLE_OAUTH_CLIENT_SECRET')
-
 
 # --- Google Drive OAuth and API Imports ---
 try:
@@ -63,13 +61,22 @@ def auto_install_dependencies():
 auto_install_dependencies()
 
 # --- Global Configuration & Logging ---
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s %(levelname)s: %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S',
-    filename="app.log",
-    filemode="a"
-)
+# Set up logger to output to both file and console
+logger = logging.getLogger()
+logger.setLevel(logging.DEBUG)
+
+# File handler
+file_handler = logging.FileHandler("app.log", mode="a")
+file_formatter = logging.Formatter('%(asctime)s %(levelname)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+file_handler.setFormatter(file_formatter)
+logger.addHandler(file_handler)
+
+# Console handler
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.DEBUG)
+console_formatter = logging.Formatter('%(asctime)s %(levelname)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+console_handler.setFormatter(console_formatter)
+logger.addHandler(console_handler)
 
 # --- SQLite Database Setup ---
 DB_FILENAME = "jobs.db"
@@ -145,7 +152,6 @@ DEFAULT_HEADERS = {
 }
 
 # --- Google Drive Configuration ---
-# IMPORTANT: Replace with your OAuth 2.0 client details from Google Cloud Console.
 GOOGLE_CLIENT_CONFIG = {
     "installed": {
         "client_id": client_id,
@@ -502,8 +508,10 @@ def oauth2callback():
         stored_state, job_id = stored.split(":")
         job_id = int(job_id)
     except Exception as e:
+        logging.exception("Error retrieving OAuth state:")
         return "Error retrieving OAuth state.", 500
     if state_code != stored_state:
+        logging.error("State mismatch in OAuth callback.")
         return "State mismatch.", 400
     redirect_uri = request.host_url.rstrip("/") + "/oauth2callback"
     config = {
