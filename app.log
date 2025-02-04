@@ -1357,3 +1357,23 @@ playwright._impl._errors.Error: Page.goto: net::ERR_ABORTED at https://docs.pino
 Call log:
   - navigating to "https://docs.pinot.apache.org/release-0.9.0/operators/operating-pinot/minion-merge-rollup-task#metrics", waiting until "load"
 
+2025-02-04 12:59:13 INFO: [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on http://127.0.0.1:9999
+2025-02-04 12:59:13 INFO: [33mPress CTRL+C to quit[0m
+2025-02-04 12:59:16 INFO: 127.0.0.1 - - [04/Feb/2025 12:59:16] "GET / HTTP/1.1" 200 -
+2025-02-04 12:59:17 INFO: 127.0.0.1 - - [04/Feb/2025 12:59:17] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+2025-02-04 12:59:17 INFO: 127.0.0.1 - - [04/Feb/2025 12:59:17] "GET /progress HTTP/1.1" 200 -
+2025-02-04 12:59:18 INFO: 127.0.0.1 - - [04/Feb/2025 12:59:18] "GET /progress HTTP/1.1" 200 -
+2025-02-04 12:59:19 INFO: 127.0.0.1 - - [04/Feb/2025 12:59:19] "GET /progress HTTP/1.1" 200 -
+2025-02-04 12:59:20 INFO: 127.0.0.1 - - [04/Feb/2025 12:59:20] "GET /progress HTTP/1.1" 200 -
+2025-02-04 12:59:21 INFO: 127.0.0.1 - - [04/Feb/2025 12:59:21] "GET /progress HTTP/1.1" 200 -
+2025-02-04 12:59:21 INFO: 127.0.0.1 - - [04/Feb/2025 12:59:21] "GET /jobs HTTP/1.1" 200 -
+2025-02-04 12:59:22 INFO: 127.0.0.1 - - [04/Feb/2025 12:59:22] "GET /progress HTTP/1.1" 200 -
+2025-02-04 12:59:23 INFO: 127.0.0.1 - - [04/Feb/2025 12:59:23] "GET /progress HTTP/1.1" 200 -
+2025-02-04 12:59:24 INFO: 127.0.0.1 - - [04/Feb/2025 12:59:24] "GET /progress HTTP/1.1" 200 -
+2025-02-04 12:59:25 INFO: 127.0.0.1 - - [04/Feb/2025 12:59:25] "GET /progress HTTP/1.1" 200 -
+2025-02-04 12:59:26 INFO: 127.0.0.1 - - [04/Feb/2025 12:59:26] "GET /progress HTTP/1.1" 200 -
+2025-02-04 12:59:26 INFO: 127.0.0.1 - - [04/Feb/2025 12:59:26] "GET /jobs HTTP/1.1" 200 -
+2025-02-04 12:59:27 INFO: 127.0.0.1 - - [04/Feb/2025 12:59:27] "GET /progress HTTP/1.1" 200 -
+2025-02-04 12:59:28 INFO: 127.0.0.1 - - [04/Feb/2025 12:59:28] "GET /progress HTTP/1.1" 200 -
+2025-02-04 12:59:29 INFO: 127.0.0.1 - - [04/Feb/2025 12:59:29] "GET /progress HTTP/1.1" 200 -

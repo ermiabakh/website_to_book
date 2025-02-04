@@ -20,6 +20,7 @@ import psutil
 from playwright.async_api import async_playwright
 from threading import Event
 import concurrent.futures
+import random # For User-Agent randomization
 
 # Automatically install aiohttp if not available
 try:
@@ -55,8 +56,10 @@ def auto_install_dependencies():
         "flask": "flask",
         "bs4": "bs4",
         "playwright": "playwright",
+        "playwright_stealth": "playwright_stealth", # Install stealth plugin
         "psutil": "psutil",
-        "aiohttp": "aiohttp"
+        "aiohttp": "aiohttp",
+        "dotenv": "dotenv"
     }
     for mod, pkg in packages.items():
         try:
@@ -70,6 +73,8 @@ def auto_install_dependencies():
         logging.exception("Error installing Playwright browsers:")
 
 auto_install_dependencies()
+
+from playwright_stealth import stealth_async # Import stealth
 
 # --- Global Configuration & Logging ---
 logger = logging.getLogger()
@@ -145,9 +150,30 @@ progress = {
 html_pages = []
 resource_cache = {}
 DISALLOWED_DOMAINS = ["googleads.g.doubleclick.net"]
+
+# --- User-Agent List for Randomization ---
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:89.0) Gecko/20100101 Firefox/89.0",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 14_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1"
+]
+def get_random_user_agent():
+    return random.choice(USER_AGENTS)
+
 DEFAULT_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.0.0 Safari/537.36"
+    "User-Agent": get_random_user_agent(), # Use random User-Agent
+    "Accept-Language": "en-US,en;q=0.9",  # Include Accept-Language
+    "Accept-Encoding": "gzip, deflate, br", # Include Accept-Encoding
+    "Connection": "keep-alive",            # Include Connection keep-alive
+    "Upgrade-Insecure-Requests": "1",     # Request secure upgrades
+    "Sec-Fetch-Dest": "document",          # Indicate document fetch
+    "Sec-Fetch-Mode": "navigate",          # Indicate navigation mode
+    "Sec-Fetch-Site": "none",              # Indicate no site context
+    "Sec-Fetch-User": "?1",                # Indicate user navigation
 }
+
 
 # --- Google Drive Configuration ---
 GOOGLE_CLIENT_CONFIG = {
@@ -261,8 +287,20 @@ def inline_resources(html, page_url):
 async def generate_pdf_version(html_path, pdf_path):
     file_url = "file:///" + os.path.abspath(html_path)
     async with async_playwright() as p:
-        # Pass an argument to help hide headless mode if needed:
-        browser = await p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
+        # Launch browser with stealth arguments and potentially hide headless mode:
+        browser = await p.chromium.launch(headless=True, args=[
+            "--no-sandbox",  # often needed in docker/CI
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-accelerated-2d-canvas",
+            "--no-first-run",
+            "--no-zygote",
+            "--single-process",
+            "--disable-gpu",
+            "--lang=en-US,en", # Set language
+             # Try to hide headless - may not be fully effective
+            '--disable-blink-features=AutomationControlled' # Important for stealth
+        ])
         context = await browser.new_context()
         page = await context.new_page()
         await wait_if_paused()
@@ -312,7 +350,8 @@ async def crawl_links(root_url, base_domain, max_depth):
     q = asyncio.Queue()
     await q.put((root_url, 0))
     timeout = aiohttp.ClientTimeout(total=10)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    headers = DEFAULT_HEADERS.copy() # Use default headers for crawling
+    async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session: # Pass headers here
         async def worker():
             while True:
                 try:
@@ -351,19 +390,25 @@ async def generate_html_task(browser, url, temp_html_dir, semaphore, idx, retrie
             context = None
             try:
                 await wait_if_paused()
-                # Create a new browser context with realistic settings:
+                # Create a new browser context with realistic settings AND stealth:
                 context = await browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.0.0 Safari/537.36",
+                    user_agent=get_random_user_agent(), # Randomized User-Agent for each context
                     viewport={"width": 1280, "height": 800},
-                    ignore_https_errors=True
+                    ignore_https_errors=True,
+                    # Add more human-like preferences, optional:
+                    locale="en-US",
+                    timezone_id="America/New_York" # Example timezone
                 )
                 await context.set_extra_http_headers({
                     "Accept-Language": "en-US,en;q=0.9"
                 })
                 page = await context.new_page()
+                await stealth_async(page) # Apply stealth to this page
                 await wait_if_paused()
-                await page.goto(url, timeout=60000)
-                await page.wait_for_load_state("networkidle", timeout=60000)
+                await page.goto(url, timeout=90000) # Increased timeout for slow pages/CDNs
+                await page.wait_for_load_state("networkidle", timeout=90000) # Increased timeout
+                # Add a small delay to simulate human reading time before getting content
+                await asyncio.sleep(random.uniform(2, 5)) # Wait 2-5 seconds randomly
                 title = await page.title()
                 if not title:
                     title = url
@@ -387,6 +432,7 @@ async def generate_html_task(browser, url, temp_html_dir, semaphore, idx, retrie
                         await context.close()
                     except Exception:
                         pass
+                await asyncio.sleep(5) # Wait before retrying to avoid rate limiting
         return result
 
 def merge_html_pages(pages, output_path):
@@ -399,6 +445,7 @@ def merge_html_pages(pages, output_path):
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
   <style>
     .page-break { margin-top: 2rem; border-top: 2px dashed #ccc; padding-top: 2rem; }
+    body { word-wrap: break-word; } /* Prevent horizontal overflow in PDF */
   </style>
 </head>
 <body>
@@ -810,8 +857,20 @@ async def main_scraping(root_url, workers, max_depth, chunk_size, job_id):
     semaphore = asyncio.Semaphore(workers)
     total = len(crawled_urls)
     async with async_playwright() as p:
-        # Use arguments to help bypass detection:
-        browser = await p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
+        # Launch browser with stealth arguments:
+        browser = await p.chromium.launch(headless=True, args=[
+            "--no-sandbox",  # often needed in docker/CI
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-accelerated-2d-canvas",
+            "--no-first-run",
+            "--no-zygote",
+            "--single-process",
+            "--disable-gpu",
+            "--lang=en-US,en", # Set language
+             # Try to hide headless - may not be fully effective
+            '--disable-blink-features=AutomationControlled' # Important for stealth
+        ])
         for start in range(0, total, chunk_size):
             await wait_if_paused()
             chunk_urls = crawled_urls[start:start+chunk_size]
