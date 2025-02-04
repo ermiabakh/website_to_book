@@ -140,9 +140,9 @@ progress = {
     "final_html": "",
     "pdf_filename": "",
     "compressed_pdf": "",
-    "timeline": []  # Timeline messages for UI
+    "timeline": []
 }
-html_pages = []  # Holds downloaded page info
+html_pages = []
 resource_cache = {}
 DISALLOWED_DOMAINS = ["googleads.g.doubleclick.net"]
 DEFAULT_HEADERS = {
@@ -162,10 +162,10 @@ GOOGLE_CLIENT_CONFIG = {
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 
 # --- Job Control Events ---
-job_pause_event = Event()   # When set, job is paused.
-job_cancel_event = Event()  # When set, job should cancel.
+job_pause_event = Event()
+job_cancel_event = Event()
 
-# --- Helper function to add timeline messages ---
+# --- Helper: Timeline Logging ---
 def add_timeline(message):
     timestamp = datetime.now().strftime("%H:%M:%S")
     msg = f"[{timestamp}] {message}"
@@ -174,14 +174,14 @@ def add_timeline(message):
         progress["timeline"] = progress["timeline"][-100:]
     logging.debug(msg)
 
-# --- Async helper to wait if job is paused ---
+# --- Async helper to wait if paused ---
 async def wait_if_paused():
     while job_pause_event.is_set():
         await asyncio.sleep(1)
         if job_cancel_event.is_set():
             raise Exception("Job Cancelled")
 
-# --- Helper: Check if URL is valid for crawling ---
+# --- Helper: Validate URL ---
 def is_valid_url(url):
     disallowed_extensions = [
         ".zip", ".rar", ".7z", ".exe", ".mp4", ".avi", ".mov", ".wmv",
@@ -197,7 +197,7 @@ def is_valid_url(url):
             return False
     return True
 
-# --- Helper: Inline Resources (CSS and Images) ---
+# --- Helper: Inline Resources ---
 def inline_resources(html, page_url):
     soup = BeautifulSoup(html, "html.parser")
     for link in soup.find_all("link", rel="stylesheet"):
@@ -257,11 +257,12 @@ def inline_resources(html, page_url):
                 img["src"] = data_uri
     return str(soup)
 
-# --- Helper: Generate PDF Version using Playwright ---
+# --- Helper: Generate PDF using Playwright ---
 async def generate_pdf_version(html_path, pdf_path):
     file_url = "file:///" + os.path.abspath(html_path)
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        # Pass an argument to help hide headless mode if needed:
+        browser = await p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
         context = await browser.new_context()
         page = await context.new_page()
         await wait_if_paused()
@@ -269,7 +270,7 @@ async def generate_pdf_version(html_path, pdf_path):
         await page.pdf(path=pdf_path, format="A4")
         await browser.close()
 
-# --- Helper: Compress PDF using Ghostscript ---
+# --- Helper: Compress PDF ---
 def compress_pdf(input_pdf, output_pdf):
     gs_command = shutil.which("gs")
     if gs_command is None:
@@ -293,7 +294,7 @@ def compress_pdf(input_pdf, output_pdf):
         logging.exception(f"Ghostscript compression error: {e}")
         return False
 
-# --- Process Pool for CPU-bound HTML Parsing ---
+# --- Process Pool for HTML Parsing ---
 process_executor = concurrent.futures.ProcessPoolExecutor(max_workers=os.cpu_count())
 def extract_links(html, current_url, base_domain):
     new_links = []
@@ -305,7 +306,7 @@ def extract_links(html, current_url, base_domain):
             new_links.append(abs_url)
     return new_links
 
-# --- Revised Crawl Links Using aiohttp and ProcessPoolExecutor ---
+# --- Revised Crawl Links Using aiohttp + ProcessPoolExecutor ---
 async def crawl_links(root_url, base_domain, max_depth):
     visited = set()
     q = asyncio.Queue()
@@ -341,7 +342,7 @@ async def crawl_links(root_url, base_domain, max_depth):
             w.cancel()
     return list(visited)
 
-# --- Updated Generate HTML Task with Retries ---
+# --- Updated Generate HTML Task with Retries and Stealth Context ---
 async def generate_html_task(browser, url, temp_html_dir, semaphore, idx, retries=3):
     global progress
     result = None
@@ -350,7 +351,15 @@ async def generate_html_task(browser, url, temp_html_dir, semaphore, idx, retrie
             context = None
             try:
                 await wait_if_paused()
-                context = await browser.new_context()
+                # Create a new browser context with realistic settings:
+                context = await browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.0.0 Safari/537.36",
+                    viewport={"width": 1280, "height": 800},
+                    ignore_https_errors=True
+                )
+                await context.set_extra_http_headers({
+                    "Accept-Language": "en-US,en;q=0.9"
+                })
                 page = await context.new_page()
                 await wait_if_paused()
                 await page.goto(url, timeout=60000)
@@ -367,7 +376,7 @@ async def generate_html_task(browser, url, temp_html_dir, semaphore, idx, retrie
                 result = {"url": url, "title": title, "content": inlined_html, "order": idx}
                 await page.close()
                 await context.close()
-                break  # Success: exit retry loop
+                break  # Success, exit retry loop.
             except Exception as e:
                 err = f"Attempt {attempt} - Error downloading HTML for {url}: {e}"
                 progress["error"] = err
@@ -379,9 +388,6 @@ async def generate_html_task(browser, url, temp_html_dir, semaphore, idx, retrie
                     except Exception:
                         pass
         return result
-
-# --- Generate HTML Task using Playwright (unchanged aside from retries) ---
-# (See function above)
 
 def merge_html_pages(pages, output_path):
     head = """<!doctype html>
@@ -417,10 +423,10 @@ def merge_html_pages(pages, output_path):
         f.write(final_html)
     logging.debug(f"Merged HTML saved to {output_path}")
 
-# --- Helper Functions ---
 def get_base_domain(url):
     parsed = urlparse(url)
     return parsed.netloc
+
 def sanitize_filename(name):
     return re.sub(r'[\\/*?:"<>|]', "_", name)
 
@@ -626,7 +632,6 @@ def start():
     workers = int(data.get("workers", 4))
     depth = int(data.get("depth", 1))
     chunk_size = int(data.get("chunk", 5))
-    
     num_cores = os.cpu_count() or 1
     vm = psutil.virtual_memory()
     logging.debug(f"Detected CPU cores: {num_cores}, Total Memory: {vm.total/1024/1024:.2f} MB, Available: {vm.available/1024/1024:.2f} MB")
@@ -634,11 +639,9 @@ def start():
         logging.debug(f"Reducing worker count from {workers} to {num_cores} based on CPU cores.")
         workers = num_cores
     logging.debug(f"Using chunk size: {chunk_size}")
-    
     job_name = url
     start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     job_id = insert_job(job_name, start_time, "Started")
-    
     progress.update({
         "total_urls": 0,
         "downloaded": 0,
@@ -657,10 +660,8 @@ def start():
     if os.path.exists("temp_html"):
         shutil.rmtree("temp_html")
     os.makedirs("temp_html", exist_ok=True)
-    
     job_pause_event.clear()
     job_cancel_event.clear()
-    
     threading.Thread(target=run_scraping, args=(url, workers, depth, chunk_size, job_id), daemon=True).start()
     return jsonify({"status": "started"})
 @app.route("/pause", methods=["POST"])
@@ -809,7 +810,8 @@ async def main_scraping(root_url, workers, max_depth, chunk_size, job_id):
     semaphore = asyncio.Semaphore(workers)
     total = len(crawled_urls)
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        # Use arguments to help bypass detection:
+        browser = await p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
         for start in range(0, total, chunk_size):
             await wait_if_paused()
             chunk_urls = crawled_urls[start:start+chunk_size]
