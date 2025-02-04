@@ -19,9 +19,16 @@ from bs4 import BeautifulSoup
 import psutil
 from playwright.async_api import async_playwright
 from threading import Event
+import concurrent.futures
+
+# Automatically install aiohttp if not available
+try:
+    import aiohttp  # for asynchronous HTTP crawling
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "aiohttp"])
+    import aiohttp
 
 # Use Ghostscript for PDF compression.
-# Ensure Ghostscript is installed and available as "gs" on your system.
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -48,7 +55,8 @@ def auto_install_dependencies():
         "flask": "flask",
         "bs4": "bs4",
         "playwright": "playwright",
-        "psutil": "psutil"
+        "psutil": "psutil",
+        "aiohttp": "aiohttp"
     }
     for mod, pkg in packages.items():
         try:
@@ -66,12 +74,10 @@ auto_install_dependencies()
 # --- Global Configuration & Logging ---
 logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
-
 file_handler = logging.FileHandler("app.log", mode="a")
 file_formatter = logging.Formatter('%(asctime)s %(levelname)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 file_handler.setFormatter(file_formatter)
 logger.addHandler(file_handler)
-
 console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.DEBUG)
 console_formatter = logging.Formatter('%(asctime)s %(levelname)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
@@ -80,7 +86,6 @@ logger.addHandler(console_handler)
 
 # --- SQLite Database Setup ---
 DB_FILENAME = "jobs.db"
-
 def init_db():
     conn = sqlite3.connect(DB_FILENAME)
     c = conn.cursor()
@@ -99,7 +104,6 @@ def init_db():
     )''')
     conn.commit()
     conn.close()
-
 def insert_job(job_name, start_time, status):
     conn = sqlite3.connect(DB_FILENAME)
     c = conn.cursor()
@@ -108,7 +112,6 @@ def insert_job(job_name, start_time, status):
     conn.commit()
     conn.close()
     return job_id
-
 def update_job(job_id, **kwargs):
     conn = sqlite3.connect(DB_FILENAME)
     c = conn.cursor()
@@ -118,7 +121,6 @@ def update_job(job_id, **kwargs):
     c.execute(f"UPDATE jobs SET {fields} WHERE id = ?", values)
     conn.commit()
     conn.close()
-
 def get_all_jobs():
     conn = sqlite3.connect(DB_FILENAME)
     c = conn.cursor()
@@ -126,7 +128,6 @@ def get_all_jobs():
     jobs = c.fetchall()
     conn.close()
     return jobs
-
 init_db()
 
 # --- Global Variables for Scraping Job ---
@@ -142,7 +143,6 @@ progress = {
     "timeline": []  # Timeline messages for UI
 }
 html_pages = []  # Holds downloaded page info
-
 resource_cache = {}
 DISALLOWED_DOMAINS = ["googleads.g.doubleclick.net"]
 DEFAULT_HEADERS = {
@@ -154,7 +154,7 @@ GOOGLE_CLIENT_CONFIG = {
     "installed": {
         "client_id": client_id,
         "client_secret": client_secret,
-        "redirect_uris": [],  # We'll set this dynamically
+        "redirect_uris": [],
         "auth_uri": "https://accounts.google.com/o/oauth2/auth",
         "token_uri": "https://oauth2.googleapis.com/token"
     }
@@ -197,18 +197,7 @@ def is_valid_url(url):
             return False
     return True
 
-# --- Helper: Auto-scroll for dynamic pages ---
-async def auto_scroll(page, scroll_delay=100, max_scrolls=50):
-    for i in range(max_scrolls):
-        await wait_if_paused()
-        prev_height = await page.evaluate("document.body.scrollHeight")
-        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        await page.wait_for_timeout(scroll_delay)
-        new_height = await page.evaluate("document.body.scrollHeight")
-        if new_height == prev_height:
-            break
-
-# --- Helper Function: Inline Resources (CSS and Images) ---
+# --- Helper: Inline Resources (CSS and Images) ---
 def inline_resources(html, page_url):
     soup = BeautifulSoup(html, "html.parser")
     for link in soup.find_all("link", rel="stylesheet"):
@@ -304,6 +293,137 @@ def compress_pdf(input_pdf, output_pdf):
         logging.exception(f"Ghostscript compression error: {e}")
         return False
 
+# --- Process Pool for CPU-bound HTML Parsing ---
+process_executor = concurrent.futures.ProcessPoolExecutor(max_workers=os.cpu_count())
+def extract_links(html, current_url, base_domain):
+    new_links = []
+    soup = BeautifulSoup(html, "html.parser")
+    for link in soup.find_all("a", href=True):
+        href = link["href"]
+        abs_url = urljoin(current_url, href)
+        if base_domain in urlparse(abs_url).netloc and is_valid_url(abs_url):
+            new_links.append(abs_url)
+    return new_links
+
+# --- Revised Crawl Links Using aiohttp and ProcessPoolExecutor ---
+async def crawl_links(root_url, base_domain, max_depth):
+    visited = set()
+    q = asyncio.Queue()
+    await q.put((root_url, 0))
+    timeout = aiohttp.ClientTimeout(total=10)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async def worker():
+            while True:
+                try:
+                    current_url, depth = await q.get()
+                except asyncio.CancelledError:
+                    break
+                if current_url in visited or depth > max_depth:
+                    q.task_done()
+                    continue
+                visited.add(current_url)
+                try:
+                    async with session.get(current_url) as response:
+                        text = await response.text()
+                    loop = asyncio.get_running_loop()
+                    new_links = await loop.run_in_executor(
+                        process_executor, extract_links, text, current_url, base_domain
+                    )
+                    for link in new_links:
+                        if link not in visited:
+                            await q.put((link, depth + 1))
+                except Exception as e:
+                    logging.exception(f"Error fetching {current_url}: {e}")
+                q.task_done()
+        workers_tasks = [asyncio.create_task(worker()) for _ in range(100)]
+        await q.join()
+        for w in workers_tasks:
+            w.cancel()
+    return list(visited)
+
+# --- Updated Generate HTML Task with Retries ---
+async def generate_html_task(browser, url, temp_html_dir, semaphore, idx, retries=3):
+    global progress
+    result = None
+    async with semaphore:
+        for attempt in range(1, retries+1):
+            context = None
+            try:
+                await wait_if_paused()
+                context = await browser.new_context()
+                page = await context.new_page()
+                await wait_if_paused()
+                await page.goto(url, timeout=60000)
+                await page.wait_for_load_state("networkidle", timeout=60000)
+                title = await page.title()
+                if not title:
+                    title = url
+                full_html = await page.content()
+                inlined_html = await asyncio.to_thread(inline_resources, full_html, url)
+                temp_filename = os.path.join(temp_html_dir, f"page_{idx}.html")
+                with open(temp_filename, "w", encoding="utf-8") as f:
+                    f.write(inlined_html)
+                logging.debug(f"HTML downloaded for {url} with title: {title}")
+                result = {"url": url, "title": title, "content": inlined_html, "order": idx}
+                await page.close()
+                await context.close()
+                break  # Success: exit retry loop
+            except Exception as e:
+                err = f"Attempt {attempt} - Error downloading HTML for {url}: {e}"
+                progress["error"] = err
+                add_timeline(err)
+                logging.exception(err)
+                if context is not None:
+                    try:
+                        await context.close()
+                    except Exception:
+                        pass
+        return result
+
+# --- Generate HTML Task using Playwright (unchanged aside from retries) ---
+# (See function above)
+
+def merge_html_pages(pages, output_path):
+    head = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Merged HTML Book</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    .page-break { margin-top: 2rem; border-top: 2px dashed #ccc; padding-top: 2rem; }
+  </style>
+</head>
+<body>
+<div class="container">
+<h1>Merged HTML Book</h1>
+"""
+    body_parts = []
+    for page in pages:
+        section = f"""<div class="page-break">
+  <h2>{page['title']}</h2>
+  {page['content']}
+</div>
+"""
+        body_parts.append(section)
+    footer = """
+</div>
+</body>
+</html>
+"""
+    final_html = head + "\n".join(body_parts) + footer
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(final_html)
+    logging.debug(f"Merged HTML saved to {output_path}")
+
+# --- Helper Functions ---
+def get_base_domain(url):
+    parsed = urlparse(url)
+    return parsed.netloc
+def sanitize_filename(name):
+    return re.sub(r'[\\/*?:"<>|]', "_", name)
+
 # --- Flask HTML Template ---
 HTML_TEMPLATE = """
 <!doctype html>
@@ -312,7 +432,6 @@ HTML_TEMPLATE = """
     <meta charset="utf-8">
     <title>Website to HTML Book Generator</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <!-- Bootstrap 5 CSS -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
       body { padding-top: 2rem; background-color: #f8f9fa; }
@@ -332,12 +451,7 @@ HTML_TEMPLATE = """
         var xhr = new XMLHttpRequest();
         xhr.open("POST", "/start", true);
         xhr.setRequestHeader('Content-Type', 'application/json');
-        xhr.send(JSON.stringify({
-          url: url,
-          workers: workers,
-          depth: depth,
-          chunk: chunk
-        }));
+        xhr.send(JSON.stringify({ url: url, workers: workers, depth: depth, chunk: chunk }));
       }
       function pauseJob() {
         var xhr = new XMLHttpRequest();
@@ -423,7 +537,7 @@ HTML_TEMPLATE = """
             </div>
             <div class="mb-3">
               <label for="workers" class="form-label">Workers (parallel):</label>
-              <input type="number" id="workers" name="workers" value="4" min="1" class="form-control" required/>
+              <input type="number" id="workers" name="workers" value="8" min="1" class="form-control" required/>
             </div>
             <div class="mb-3">
               <label for="depth" class="form-label">Crawl Depth:</label>
@@ -465,7 +579,6 @@ HTML_TEMPLATE = """
       </div>
       <div id="error" class="alert alert-danger" style="display: none;"></div>
     </div>
-    <!-- Bootstrap 5 JS (optional) -->
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
   </body>
 </html>
@@ -473,18 +586,15 @@ HTML_TEMPLATE = """
 
 # --- Flask Application ---
 app = Flask(__name__)
-
 @app.route("/")
 def index():
     jobs = get_all_jobs()
     table_html = build_jobs_table(jobs)
     return render_template_string(HTML_TEMPLATE, jobs_table=table_html)
-
 @app.route("/jobs")
 def jobs():
     jobs = get_all_jobs()
     return build_jobs_table(jobs)
-
 def build_jobs_table(jobs):
     table_html = """<table class="table table-striped">
     <thead><tr>
@@ -509,7 +619,6 @@ def build_jobs_table(jobs):
         table_html += f"<tr><td>{job_id}</td><td>{job_name}</td><td>{start_time}</td><td>{finish_time or ''}</td><td>{url_count or 0}</td><td>{html_dl}</td><td>{pdf_dl}</td><td>{comp_dl}</td><td>{drive_dl}</td><td>{action_btn}</td></tr>"
     table_html += "</tbody></table>"
     return table_html
-
 @app.route("/start", methods=["POST"])
 def start():
     data = request.get_json()
@@ -554,21 +663,18 @@ def start():
     
     threading.Thread(target=run_scraping, args=(url, workers, depth, chunk_size, job_id), daemon=True).start()
     return jsonify({"status": "started"})
-
 @app.route("/pause", methods=["POST"])
 def pause():
     job_pause_event.set()
     progress["state"] = "Paused"
     add_timeline("Job paused by user.")
     return jsonify({"status": "paused"})
-
 @app.route("/resume", methods=["POST"])
 def resume():
     job_pause_event.clear()
     progress["state"] = "Resumed"
     add_timeline("Job resumed by user.")
     return jsonify({"status": "resumed"})
-
 @app.route("/cancel", methods=["POST"])
 def cancel():
     job_cancel_event.set()
@@ -583,16 +689,12 @@ def cancel():
     except Exception as e:
         logging.exception("Error during cleanup on cancel:")
     return jsonify({"status": "cancelled"})
-
 @app.route("/progress")
 def get_progress():
     return jsonify(progress)
-
 @app.route("/download/<path:filename>")
 def download_file(filename):
     return send_from_directory("html", filename, as_attachment=True)
-
-# --- Google Drive Upload Routes ---
 @app.route("/upload/<int:job_id>")
 def upload(job_id):
     conn = sqlite3.connect(DB_FILENAME)
@@ -605,9 +707,7 @@ def upload(job_id):
     html_file, drive_link = row
     if drive_link:
         return redirect(drive_link)
-    # Build the redirect URI from the current request
     redirect_uri = request.host_url.rstrip("/") + "/oauth2callback"
-    # Set the redirect URI in the client config
     client_config = {
         "installed": {
             "client_id": GOOGLE_CLIENT_CONFIG["installed"]["client_id"],
@@ -618,12 +718,10 @@ def upload(job_id):
         }
     }
     flow = InstalledAppFlow.from_client_config(client_config, SCOPES)
-    # Pass redirect_uri explicitly when generating the authorization URL
     auth_url, state = flow.authorization_url(prompt="consent", access_type="offline")
     with open("oauth_state.txt", "w") as f:
         f.write(f"{state}:{job_id}")
     return redirect(auth_url)
-
 @app.route("/oauth2callback")
 def oauth2callback():
     state_code = request.args.get("state")
@@ -650,7 +748,6 @@ def oauth2callback():
         }
     }
     flow = InstalledAppFlow.from_client_config(client_config, SCOPES, state=state_code)
-    # Set the redirect URI on the flow
     flow.redirect_uri = redirect_uri
     flow.fetch_token(code=code)
     credentials = flow.credentials
@@ -672,8 +769,6 @@ def oauth2callback():
     drive_link = f"https://drive.google.com/uc?id={file_uploaded.get('id')}&export=download"
     update_job(job_id, drive_link=drive_link, drive_token=credentials.to_json())
     return redirect("/")
-
-# --- Background Process Runner ---
 def run_scraping(root_url, workers, max_depth, chunk_size, job_id):
     try:
         asyncio.run(main_scraping(root_url, workers, max_depth, chunk_size, job_id))
@@ -683,8 +778,6 @@ def run_scraping(root_url, workers, max_depth, chunk_size, job_id):
         add_timeline(f"Fatal error: {e}")
         logging.exception("Error in run_scraping:")
         update_job(job_id, status="Error")
-
-# --- Main Asynchronous Function ---
 async def main_scraping(root_url, workers, max_depth, chunk_size, job_id):
     global progress, html_pages
     progress["state"] = "Initializing"
@@ -697,7 +790,6 @@ async def main_scraping(root_url, workers, max_depth, chunk_size, job_id):
     os.makedirs(html_dir, exist_ok=True)
     temp_html_dir = os.path.join("temp_html")
     os.makedirs(temp_html_dir, exist_ok=True)
-
     progress["state"] = "Crawling links"
     add_timeline("Crawling links...")
     try:
@@ -712,12 +804,10 @@ async def main_scraping(root_url, workers, max_depth, chunk_size, job_id):
     progress["total_urls"] = len(crawled_urls)
     add_timeline(f"Found {len(crawled_urls)} unique URLs.")
     logging.debug(f"Found {len(crawled_urls)} unique URLs.")
-
     progress["state"] = "Downloading HTML pages"
     add_timeline("Downloading HTML pages...")
     semaphore = asyncio.Semaphore(workers)
     total = len(crawled_urls)
-    
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         for start in range(0, total, chunk_size):
@@ -732,7 +822,6 @@ async def main_scraping(root_url, workers, max_depth, chunk_size, job_id):
                     html_pages.append(res)
                     progress["downloaded"] += 1
         await browser.close()
-
     html_pages.sort(key=lambda x: x["order"])
     progress["state"] = "Merging HTML pages"
     add_timeline("Merging HTML pages...")
@@ -741,12 +830,10 @@ async def main_scraping(root_url, workers, max_depth, chunk_size, job_id):
         final_html_path = os.path.join(html_dir, final_html_filename)
         merge_html_pages(html_pages, final_html_path)
         progress["final_html"] = final_html_filename
-        
         pdf_filename = f"{sanitize_filename(base_domain)}_book.pdf"
         pdf_path = os.path.join(html_dir, pdf_filename)
         await generate_pdf_version(final_html_path, pdf_path)
         progress["pdf_filename"] = pdf_filename
-        
         compressed_pdf_filename = f"{sanitize_filename(base_domain)}_book_compressed.pdf"
         compressed_pdf_path = os.path.join(html_dir, compressed_pdf_filename)
         if compress_pdf(pdf_path, compressed_pdf_path):
@@ -754,7 +841,6 @@ async def main_scraping(root_url, workers, max_depth, chunk_size, job_id):
             add_timeline("Compressed PDF generated.")
         else:
             add_timeline("Failed to generate compressed PDF.")
-        
         progress["merged"] = progress["total_urls"]
         progress["state"] = "Completed. Final HTML and PDFs ready."
         add_timeline("Merging completed. Final HTML, original PDF, and compressed PDF generated.")
@@ -768,133 +854,5 @@ async def main_scraping(root_url, workers, max_depth, chunk_size, job_id):
         add_timeline(f"Error during merging/PDF generation: {e}")
         logging.exception("Error during merge_html_pages or generate_pdf_version:")
         update_job(job_id, status="Error")
-
-# --- Revised Crawl Links Using asyncio.Queue ---
-async def crawl_links(root_url, base_domain, max_depth):
-    visited = set()
-    q = asyncio.Queue()
-    await q.put((root_url, 0))
-    
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context()
-        
-        async def worker():
-            while True:
-                if job_cancel_event.is_set():
-                    break
-                await wait_if_paused()
-                try:
-                    current_url, depth = await q.get()
-                except asyncio.CancelledError:
-                    break
-                if current_url in visited or depth > max_depth:
-                    q.task_done()
-                    continue
-                if not is_valid_url(current_url):
-                    logging.debug(f"Skipping non-HTML URL: {current_url}")
-                    q.task_done()
-                    continue
-                visited.add(current_url)
-                try:
-                    page = await context.new_page()
-                    await wait_if_paused()
-                    await page.goto(current_url, timeout=60000)
-                    await auto_scroll(page)
-                    await page.wait_for_load_state("networkidle", timeout=60000)
-                    content = await page.content()
-                    soup = BeautifulSoup(content, "html.parser")
-                    for link in soup.find_all("a", href=True):
-                        href = link["href"]
-                        abs_url = urljoin(current_url, href)
-                        if base_domain in urlparse(abs_url).netloc and abs_url not in visited and is_valid_url(abs_url):
-                            await q.put((abs_url, depth + 1))
-                    await page.close()
-                except Exception as e:
-                    logging.exception(f"Error crawling {current_url}:")
-                q.task_done()
-        
-        workers_tasks = [asyncio.create_task(worker()) for _ in range(10)]
-        await q.join()
-        for w in workers_tasks:
-            w.cancel()
-        await browser.close()
-    return list(visited)
-
-# --- Generate HTML Task with Auto-scroll ---
-async def generate_html_task(browser, url, temp_html_dir, semaphore, idx):
-    global progress
-    result = None
-    async with semaphore:
-        await wait_if_paused()
-        try:
-            context = await browser.new_context()
-            page = await context.new_page()
-            await wait_if_paused()
-            await page.goto(url, timeout=60000)
-            await auto_scroll(page)
-            await page.wait_for_load_state("networkidle", timeout=60000)
-            title = await page.title()
-            if not title:
-                title = url
-            full_html = await page.content()
-            inlined_html = await asyncio.to_thread(inline_resources, full_html, url)
-            temp_filename = os.path.join(temp_html_dir, f"page_{idx}.html")
-            with open(temp_filename, "w", encoding="utf-8") as f:
-                f.write(inlined_html)
-            logging.debug(f"HTML downloaded and processed for {url} with title: {title}")
-            result = {"url": url, "title": title, "content": inlined_html, "order": idx}
-            await page.close()
-            await context.close()
-        except Exception as e:
-            err = f"Error downloading HTML for {url}: {e}"
-            progress["error"] = err
-            add_timeline(err)
-            logging.exception(err)
-        return result
-
-def merge_html_pages(pages, output_path):
-    head = """<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>Merged HTML Book</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-  <style>
-    .page-break { margin-top: 2rem; border-top: 2px dashed #ccc; padding-top: 2rem; }
-  </style>
-</head>
-<body>
-<div class="container">
-<h1>Merged HTML Book</h1>
-"""
-    body_parts = []
-    for page in pages:
-        section = f"""<div class="page-break">
-  <h2>{page['title']}</h2>
-  {page['content']}
-</div>
-"""
-        body_parts.append(section)
-    footer = """
-</div>
-</body>
-</html>
-"""
-    final_html = head + "\n".join(body_parts) + footer
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write(final_html)
-    logging.debug(f"Merged HTML saved to {output_path}")
-
-# --- Helper Functions ---
-def get_base_domain(url):
-    parsed = urlparse(url)
-    return parsed.netloc
-
-def sanitize_filename(name):
-    return re.sub(r'[\\/*?:"<>|]', "_", name)
-
-# --- Run Flask App on Port 9999 ---
 if __name__ == "__main__":
     app.run(port=9999)
