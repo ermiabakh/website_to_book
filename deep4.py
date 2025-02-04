@@ -382,7 +382,7 @@ async def crawl_links(root_url, base_domain, max_depth):
             w.cancel()
     return list(visited)
 
-# --- Updated Generate HTML Task with Retries and Stealth Context ---
+# --- Updated Generate HTML Task with Browser Connection Check and Retries ---
 async def generate_html_task(browser, url, temp_html_dir, semaphore, idx, retries=3):
     global progress
     result = None
@@ -391,6 +391,13 @@ async def generate_html_task(browser, url, temp_html_dir, semaphore, idx, retrie
             context = None
             try:
                 await wait_if_paused()
+                if not browser.is_connected: # Check if browser is still connected
+                    err = f"Browser is disconnected. Cannot create new context for {url} (Attempt {attempt})."
+                    progress["error"] = err
+                    add_timeline(err)
+                    logging.error(err)
+                    break # Exit retry loop if browser is disconnected - No point retrying context on dead browser
+
                 # Create a new browser context with realistic settings AND stealth:
                 context = await browser.new_context(
                     user_agent=get_random_user_agent(), # Randomized User-Agent for each context
@@ -406,7 +413,7 @@ async def generate_html_task(browser, url, temp_html_dir, semaphore, idx, retrie
                 page = await context.new_page()
                 await stealth_async(page) # Apply stealth to this page
                 await wait_if_paused()
-                await page.goto(url, timeout=90000) # Increased timeout for slow pages/CDNs
+                await page.goto(url, timeout=120000) # Increased goto timeout to 120 seconds
                 await page.wait_for_load_state("networkidle", timeout=90000) # Increased timeout
                 # Add a small delay to simulate human reading time before getting content
                 await asyncio.sleep(random.uniform(2, 5)) # Wait 2-5 seconds randomly
@@ -857,33 +864,71 @@ async def main_scraping(root_url, workers, max_depth, chunk_size, job_id):
     add_timeline("Downloading HTML pages...")
     semaphore = asyncio.Semaphore(workers)
     total = len(crawled_urls)
-    async with async_playwright() as p:
-        # Launch browser with stealth arguments:
-        browser = await p.chromium.launch(headless=True, args=[
-            "--no-sandbox",  # often needed in docker/CI
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-accelerated-2d-canvas",
-            "--no-first-run",
-            "--no-zygote",
-            "--single-process",
-            "--disable-gpu",
-            "--lang=en-US,en", # Set language
-             # Try to hide headless - may not be fully effective
-            '--disable-blink-features=AutomationControlled' # Important for stealth
-        ])
-        for start in range(0, total, chunk_size):
-            await wait_if_paused()
-            chunk_urls = crawled_urls[start:start+chunk_size]
-            tasks = []
-            for i, url in enumerate(chunk_urls, start=start):
-                tasks.append(generate_html_task(browser, url, temp_html_dir, semaphore, i))
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for res in results:
-                if isinstance(res, dict):
-                    html_pages.append(res)
-                    progress["downloaded"] += 1
-        await browser.close()
+    browser = None # Define browser outside try block
+    try: # try block encompassing browser launch and usage
+        async with async_playwright() as p:
+            # Launch browser with stealth arguments:
+            max_launch_retries = 2 # Retry browser launch 2 times
+            for launch_attempt in range(1, max_launch_retries + 1):
+                try:
+                    browser = await p.chromium.launch(headless=True, args=[
+                        "--no-sandbox",  # often needed in docker/CI
+                        "--disable-setuid-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-accelerated-2d-canvas",
+                        "--no-first-run",
+                        "--no-zygote",
+                        "--single-process",
+                        "--disable-gpu",
+                        "--lang=en-US,en", # Set language
+                         # Try to hide headless - may not be fully effective
+                        '--disable-blink-features=AutomationControlled' # Important for stealth
+                    ])
+                    break # Browser launched successfully, break retry loop
+                except Exception as launch_err:
+                    err_msg = f"Browser launch failed on attempt {launch_attempt}/{max_launch_retries}: {launch_err}"
+                    add_timeline(err_msg)
+                    logging.error(err_msg)
+                    if launch_attempt >= max_launch_retries:
+                        progress["state"] = "Fatal Error - Browser Launch Failed"
+                        progress["error"] = err_msg
+                        update_job(job_id, status="Error")
+                        return # Exit main_scraping if browser cannot be launched
+                    await asyncio.sleep(5) # Wait before retrying launch
+            if browser is None: # Should not reach here ideally if retry loop works, but for extra safety.
+                progress["state"] = "Fatal Error - Browser Instance Not Created"
+                progress["error"] = "Failed to initialize browser instance after multiple retries."
+                update_job(job_id, status="Error")
+                return
+
+
+            for start in range(0, total, chunk_size):
+                await wait_if_paused()
+                chunk_urls = crawled_urls[start:start+chunk_size]
+                tasks = []
+                for i, url in enumerate(chunk_urls, start=start):
+                    tasks.append(generate_html_task(browser, url, temp_html_dir, semaphore, i))
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for res in results:
+                    if isinstance(res, dict):
+                        html_pages.append(res)
+                        progress["downloaded"] += 1
+
+    except Exception as main_err: # Catch any errors in main scraping loop itself
+        progress["state"] = "Fatal Error during HTML download loop"
+        progress["error"] = str(main_err)
+        add_timeline(f"Fatal error in HTML download loop: {main_err}")
+        logging.exception("Exception in main HTML download loop:")
+        update_job(job_id, status="Error")
+
+    finally: # Ensure browser is closed even if errors occur in try block
+        if browser: # Check if browser was initialized
+            try:
+                await browser.close()
+            except Exception as close_err:
+                logging.error(f"Error closing browser: {close_err}")
+
+
     html_pages.sort(key=lambda x: x["order"])
     progress["state"] = "Merging HTML pages"
     add_timeline("Merging HTML pages...")
