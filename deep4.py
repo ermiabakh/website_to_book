@@ -59,7 +59,8 @@ def auto_install_dependencies():
         "playwright_stealth": "playwright_stealth", # Install stealth plugin
         "psutil": "psutil",
         "aiohttp": "aiohttp",
-        "dotenv": "dotenv"
+        "dotenv": "dotenv",
+        "setuptools": "setuptools" # Ensure setuptools is installed
     }
     for mod, pkg in packages.items():
         try:
