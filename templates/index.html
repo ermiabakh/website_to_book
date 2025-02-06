@@ -1,494 +1,607 @@
 <!DOCTYPE html>
 <html>
   <head>
-    <title>Website to PDF Converter</title>
+    <title>Website PDF Converter</title>
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/tailwindcss/2.2.19/tailwind.min.css"
+    />
     <style>
-      body {
-        font-family: Arial, sans-serif;
-        max-width: 1000px; /* Increased max-width */
-        margin: 0 auto;
-        padding: 20px;
+      /* Custom styles for buttons to make them visually distinct */
+      .download-button {
+        @apply bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded ml-2 inline-block cursor-pointer; /* cursor-pointer for button feel */
       }
-      .form-group {
-        margin-bottom: 15px;
+      .download-link {
+        @apply inline-block py-2 px-2; /* Basic styling for the text link if you want */
       }
-      label {
-        display: block;
-        margin-bottom: 5px;
+      #in-browser-progress-container {
+        @apply fixed top-0 left-0 w-full h-full bg-gray-500 bg-opacity-50 hidden items-center justify-center;
+        z-index: 50; /* Ensure it's on top */
       }
-      input,
-      select {
-        width: 100%;
-        padding: 8px;
-        margin-bottom: 10px;
+      #in-browser-progress-box {
+        @apply bg-white p-8 rounded-lg shadow-lg text-center;
       }
-      button {
-        padding: 10px 20px;
-        background: #4caf50;
-        color: white;
-        border: none;
-        border-radius: 4px;
-        cursor: pointer;
+      #in-browser-progress-bar-container {
+        @apply bg-gray-200 rounded-full h-2.5 mb-4;
+        width: 300px; /* Wider progress bar */
+        margin: 0 auto; /* Center the progress bar */
       }
-      button:hover {
-        background: #45a049;
+      #in-browser-progress-bar {
+        @apply bg-blue-500 h-2.5 rounded-full;
+        width: 0%; /* Initial width is 0% */
       }
-      .progress-container {
-        margin-top: 20px;
-        display: none;
+      #chunk-progress-list {
+        @apply mt-4 text-left max-h-40 overflow-y-auto; /* Scrollable chunk list */
+        font-size: 0.8rem;
+        color: #6b7280;
       }
-      .progress-bar {
-        width: 100%;
-        height: 20px;
-        background-color: #f0f0f0;
-        border-radius: 10px;
-        overflow: hidden;
+      .chunk-progress-item {
+        @apply flex justify-between items-center mb-1;
       }
-      .progress-fill {
-        height: 100%;
-        background-color: #4caf50;
-        transition: width 0.3s ease;
+      .chunk-filename {
+        @apply truncate pr-2; /* Truncate filename if too long */
+        max-width: 60%;
       }
-      #messages {
-        margin-top: 20px;
-        padding: 10px;
-        background: #f8f8f8;
-        border-radius: 4px;
-        max-height: 200px;
-        overflow-y: auto;
-        border: 1px solid #ccc; /* Added border for better visibility */
+      .chunk-progress-bar-small-container {
+        @apply bg-gray-200 rounded-full h-2;
+        width: 40%; /* Smaller progress bars for chunks */
       }
-      .message {
-        margin: 5px 0;
-        color: #666;
-        word-wrap: break-word; /* Ensure long messages wrap */
-      }
-      .message.error {
-        color: darkred; /* Style for error messages */
-        font-weight: bold;
-      }
-      #download-link {
-        display: none;
-        margin-top: 20px;
-      } /* Initially hide download link */
-      #download-link a {
-        display: inline-block;
-        padding: 10px 20px;
-        background: #007bff;
-        color: white;
-        text-decoration: none;
-        border-radius: 4px;
-      }
-      #download-link a:hover {
-        background: #0056b3;
-      }
-
-      #file-table-container,
-      #crawled-url-table-container,
-      #statistics-container {
-        margin-top: 20px;
-        display: none; /* Initially hidden */
-      }
-
-      #file-table,
-      #crawled-url-table,
-      #statistics-table {
-        width: 100%;
-        border-collapse: collapse;
-        margin-top: 10px;
-      }
-
-      #file-table th,
-      #file-table td,
-      #crawled-url-table th,
-      #crawled-url-table td,
-      #statistics-table th,
-      #statistics-table td {
-        border: 1px solid #ddd;
-        padding: 8px;
-        text-align: left;
-      }
-
-      #file-table th,
-      #crawled-url-table th,
-      #statistics-table th {
-        background-color: #f0f0f0;
-      }
-      #crawled-url-table td a {
-        word-break: break-all; /* Break long URLs */
-        display: block; /* Make link fill cell width */
+      .chunk-progress-bar-small {
+        @apply bg-blue-300 h-2 rounded-full; /* Lighter blue for chunk bars */
+        width: 0%;
       }
     </style>
   </head>
-  <body>
-    <h1>Website to PDF Converter</h1>
-    <form id="conversionForm">
-      <div class="form-group">
-        <label for="url">Website URL:</label>
-        <input
-          type="url"
-          id="url"
-          name="url"
-          required
-          placeholder="https://example.com"
-        />
+  <body class="bg-gray-100 p-4">
+    <div class="container mx-auto">
+      <h1 class="text-2xl font-bold mb-4">Website to PDF Converter</h1>
+
+      <div class="bg-white shadow-md rounded-lg p-6 mb-8">
+        <form id="convertForm" class="space-y-4">
+          <div>
+            <label for="url" class="block text-gray-700 text-sm font-bold mb-2"
+              >Website URL:</label
+            >
+            <input
+              type="url"
+              id="url"
+              name="url"
+              required
+              class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+            />
+          </div>
+          <div>
+            <label
+              for="depth"
+              class="block text-gray-700 text-sm font-bold mb-2"
+              >Crawl Depth:</label
+            >
+            <input
+              type="number"
+              id="depth"
+              name="depth"
+              value="3"
+              min="1"
+              class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+            />
+          </div>
+          <div>
+            <label
+              for="workers"
+              class="block text-gray-700 text-sm font-bold mb-2"
+              >Workers:</label
+            >
+            <input
+              type="number"
+              id="workers"
+              name="workers"
+              value="2"
+              min="1"
+              class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+            />
+          </div>
+          <div>
+            <label
+              for="filename"
+              class="block text-gray-700 text-sm font-bold mb-2"
+              >Output Filename:</label
+            >
+            <input
+              type="text"
+              id="filename"
+              name="filename"
+              placeholder="output"
+              class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+            />
+          </div>
+          <button
+            type="submit"
+            class="bg-green-500 hover:bg-green-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline"
+          >
+            Convert to PDF
+          </button>
+        </form>
+        <div id="status" class="mt-4 text-gray-700"></div>
+        <div
+          id="progress-bar-container"
+          class="hidden bg-gray-200 rounded-full h-2.5 mb-4"
+        >
+          <div
+            id="progress-bar"
+            class="bg-green-500 h-2.5 rounded-full"
+            style="width: 0%"
+          ></div>
+        </div>
+        <div id="messages" class="mt-4 space-y-2"></div>
       </div>
 
-      <div class="form-group">
-        <label for="depth">Crawl Depth:</label>
-        <select id="depth" name="depth">
-          <option value="2">2</option>
-          <option value="3">3</option>
-          <option value="5" selected>5</option>
-          <option value="10">10</option>
-          <option value="20">20</option>
-          <option value="50">50</option>
-        </select>
+      <h2 class="text-xl font-semibold mt-8 mb-2">Generated PDFs</h2>
+      <div class="overflow-x-auto">
+        <table class="min-w-full bg-white shadow-md rounded-lg">
+          <thead class="bg-gray-200">
+            <tr>
+              <th class="px-4 py-2 text-left">Filename</th>
+              <th class="px-4 py-2 text-left">Website URL</th>
+              <th class="px-4 py-2 text-left">Conversion Time</th>
+              <th class="px-4 py-2 text-left">Links Crawled</th>
+              <th class="px-4 py-2 text-left">Successful Pages</th>
+              <th class="px-4 py-2 text-left">Failed Pages</th>
+              <th class="px-4 py-2 text-left">Download Link (Text)</th>
+              <th class="px-4 py-2 text-left">Download (Chunked)</th>
+            </tr>
+          </thead>
+          <tbody id="file-table-body">
+            <!-- PDF files will be loaded here by JavaScript -->
+          </tbody>
+        </table>
       </div>
 
-      <div class="form-group">
-        <label for="workers">Workers:</label>
-        <select id="workers" name="workers">
-          <option value="2">2</option>
-          <option value="4" selected>4</option>
-          <option value="8">8</option>
-          <option value="16">16</option>
-          <option value="32">32</option>
-          <option value="64">64</option>
-        </select>
+      <h2 class="text-xl font-semibold mt-8 mb-2">
+        Crawled URLs (During Last Conversion)
+      </h2>
+      <div class="overflow-x-auto">
+        <table class="min-w-full bg-white shadow-md rounded-lg">
+          <thead class="bg-gray-200">
+            <tr>
+              <th class="px-4 py-2 text-left">URL</th>
+            </tr>
+          </thead>
+          <tbody id="crawled-urls-body">
+            <!-- Crawled URLs will be loaded here by JavaScript -->
+          </tbody>
+        </table>
       </div>
 
-      <div class="form-group">
-        <label for="filename">PDF Filename:</label>
-        <input
-          type="text"
-          id="filename"
-          name="filename"
-          value="output"
-          placeholder="Enter filename (without .pdf)"
-        />
+      <!-- In-browser progress overlay -->
+      <div id="in-browser-progress-container">
+        <div id="in-browser-progress-box">
+          <p class="mb-4 font-semibold">Downloading File in Chunks...</p>
+          <div id="in-browser-progress-bar-container">
+            <div id="in-browser-progress-bar"></div>
+          </div>
+          <p
+            id="in-browser-progress-message"
+            class="text-sm text-gray-600 mt-2"
+          >
+            Initializing download...
+          </p>
+          <ul id="chunk-progress-list" class="hidden">
+            <!-- Chunk progress items will be added here -->
+          </ul>
+        </div>
       </div>
-
-      <button type="submit">Start Conversion</button>
-    </form>
-
-    <div class="progress-container" style="display: none">
-      <h3>Conversion Progress</h3>
-      <div class="progress-bar">
-        <div class="progress-fill" style="width: 0%"></div>
-      </div>
-      <div id="messages"></div>
-    </div>
-
-    <div id="crawled-url-table-container" style="display: none">
-      <h3>Crawled URLs</h3>
-      <table id="crawled-url-table">
-        <thead>
-          <tr>
-            <th>URL</th>
-          </tr>
-        </thead>
-        <tbody id="crawled-url-table-body">
-          <!-- Crawled URLs will be added here by JavaScript -->
-        </tbody>
-      </table>
-    </div>
-
-    <div id="download-link" style="display: none">
-      <a id="download-anchor" href="#" target="_blank">Download PDF</a>
-    </div>
-
-    <div id="file-table-container">
-      <h3>Generated Files</h3>
-      <table id="file-table">
-        <thead>
-          <tr>
-            <th>Filename</th>
-            <th>Website URL</th>
-            <th>Conversion Time</th>
-            <th>Crawled Links</th>
-            <th>Successful Pages</th>
-            <th>Failed Pages</th>
-            <th>Download Link</th>
-          </tr>
-        </thead>
-        <tbody id="file-table-body">
-          <!-- File rows will be added here by JavaScript -->
-        </tbody>
-      </table>
-    </div>
-
-    <div id="statistics-container" style="display: none">
-      <h3>Conversion Statistics</h3>
-      <table id="statistics-table">
-        <thead>
-          <tr>
-            <th>Statistic</th>
-            <th>Value</th>
-          </tr>
-        </thead>
-        <tbody id="statistics-table-body">
-          <!-- Statistics will be added here by JavaScript -->
-        </tbody>
-      </table>
     </div>
 
     <script>
-      const form = document.getElementById("conversionForm");
-      const progressContainer = document.querySelector(".progress-container");
-      const progressFill = document.querySelector(".progress-fill");
-      const messagesDiv = document.getElementById("messages");
-      const downloadLinkDiv = document.getElementById("download-link");
-      const fileTableContainer = document.getElementById(
-        "file-table-container"
-      );
-      const fileTableBody = document.getElementById("file-table-body");
-      const crawledUrlTableContainer = document.getElementById(
-        "crawled-url-table-container"
-      );
-      const crawledUrlTableBody = document.getElementById(
-        "crawled-url-table-body"
-      );
-      const statisticsContainer = document.getElementById(
-        "statistics-container"
-      );
-      const statisticsTableBody = document.getElementById(
-        "statistics-table-body"
-      );
+      document
+        .getElementById("convertForm")
+        .addEventListener("submit", function (event) {
+          event.preventDefault();
+          const formData = new FormData(this);
+          const statusDiv = document.getElementById("status");
+          const progressBarContainer = document.getElementById(
+            "progress-bar-container"
+          );
+          const progressBar = document.getElementById("progress-bar");
+          const messagesDiv = document.getElementById("messages");
+          const fileTableBody = document.getElementById("file-table-body");
+          const crawledUrlsBody = document.getElementById("crawled-urls-body");
 
-      function populateFileTable(files) {
-        fileTableBody.innerHTML = "";
-        if (files && files.length > 0) {
-          files.forEach((file) => {
-            const row = fileTableBody.insertRow();
-            row.insertCell().textContent = file.filename;
-            row.insertCell().textContent = file.website_url;
-            row.insertCell().textContent = new Date(
-              file.conversion_timestamp
-            ).toLocaleString();
-            row.insertCell().textContent = file.total_links_crawled;
-            row.insertCell().textContent = file.successful_pages;
-            row.insertCell().textContent = file.failed_pages;
+          statusDiv.textContent = "Conversion started...";
+          progressBarContainer.classList.remove("hidden");
+          progressBar.style.width = "0%";
+          messagesDiv.innerHTML = "";
+          crawledUrlsBody.innerHTML = "";
+          fileTableBody.innerHTML = "";
 
-            const downloadLinkCell = row.insertCell();
-            const downloadLink = document.createElement("a");
-            downloadLink.href = file.download_url;
-            downloadLink.textContent = "Download";
-            downloadLinkCell.appendChild(downloadLink);
+          let eventSource = new EventSource("/progress");
+
+          eventSource.onmessage = function (event) {
+            const data = JSON.parse(event.data);
+
+            if (data.type === "progress") {
+              const progress = (data.current / data.total) * 100;
+              progressBar.style.width = progress + "%";
+              statusDiv.textContent = `Generating PDF pages: ${progress.toFixed(
+                0
+              )}%`;
+              if (data.message) {
+                messagesDiv.innerHTML += `<p>${data.message}</p>`;
+              }
+            } else if (data.type === "message") {
+              messagesDiv.innerHTML += `<p class="text-sm italic text-gray-600">${data.message}</p>`;
+            } else if (data.type === "crawling_start") {
+              statusDiv.textContent = "Crawling website...";
+            } else if (data.type === "crawling_urls_init") {
+              crawledUrlsBody.innerHTML = "";
+            } else if (data.type === "complete") {
+              statusDiv.textContent = "Conversion complete!";
+              progressBarContainer.classList.add("hidden");
+              progressBar.style.width = "100%";
+              messagesDiv.innerHTML += `<p class="font-bold text-green-600">PDF conversion finished!</p>`;
+              eventSource.close();
+              loadFiles();
+
+              if (data.crawled_urls && data.crawled_urls.length > 0) {
+                crawledUrlsBody.innerHTML = "";
+                data.crawled_urls.forEach((url) => {
+                  crawledUrlsBody.innerHTML += `<tr><td class="border px-4 py-2">${url}</td></tr>`;
+                });
+              } else {
+                crawledUrlsBody.innerHTML =
+                  '<tr><td class="border px-4 py-2 text-center" colspan="1">No URLs crawled in this conversion.</td></tr>';
+              }
+            } else if (data.type === "error") {
+              statusDiv.textContent = `Conversion error: ${data.message}`;
+              progressBarContainer.classList.add("hidden");
+              messagesDiv.innerHTML += `<p class="font-bold text-red-600">Error: ${data.message}</p>`;
+              eventSource.close();
+            }
+          };
+
+          fetch("/convert", {
+            method: "POST",
+            body: formData,
           });
-          fileTableContainer.style.display = "block"; // Show file table if files exist
-        } else {
-          fileTableBody.innerHTML = `<tr><td colspan="7">No files generated yet.</td></tr>`;
-          fileTableContainer.style.display = "block"; // Show even if empty, with message
-        }
-      }
-
-      async function loadExistingFiles() {
-        const response = await fetch("/files");
-        if (response.ok) {
-          const data = await response.json();
-          populateFileTable(data.files);
-        } else {
-          console.error("Failed to load existing files.");
-          fileTableBody.innerHTML = `<tr><td colspan="7" class="error">Failed to load files.</td></tr>`;
-          fileTableContainer.style.display = "block";
-        }
-      }
-
-      form.addEventListener("submit", async (e) => {
-        e.preventDefault();
-        progressContainer.style.display = "block";
-        downloadLinkDiv.style.display = "none";
-        fileTableContainer.style.display = "none";
-        crawledUrlTableContainer.style.display = "none";
-        statisticsContainer.style.display = "none"; // Hide statistics container on new conversion start
-        messagesDiv.innerHTML = "";
-        progressFill.style.width = "0%";
-        crawledUrlTableBody.innerHTML = ""; // Clear crawled URLs table
-        // fileTableBody.innerHTML = "";  // Keep existing files table visible
-
-        const response = await fetch("/convert", {
-          method: "POST",
-          body: new FormData(form),
         });
 
-        if (!response.ok) {
-          alert("Error starting conversion");
-          progressContainer.style.display = "none";
-          return;
+      async function loadFiles() {
+        const response = await fetch("/files");
+        const data = await response.json();
+        const fileTableBody = document.getElementById("file-table-body");
+        fileTableBody.innerHTML = "";
+
+        if (data.files && data.files.length > 0) {
+          data.files.forEach((file) => {
+            const row = `
+                    <tr>
+                        <td class="border px-4 py-2">${file.filename}</td>
+                        <td class="border px-4 py-2">${file.website_url}</td>
+                        <td class="border px-4 py-2">${file.conversion_timestamp}</td>
+                        <td class="border px-4 py-2">${file.total_links_crawled}</td>
+                        <td class="border px-4 py-2">${file.successful_pages}</td>
+                        <td class="border px-4 py-2">${file.failed_pages}</td>
+                        <td class="border px-4 py-2">
+                            <a href="${file.download_url}" download="${file.filename}" class="download-link">Download Link</a>
+                        </td>
+                        <td class="border px-4 py-2">
+                            <a href="#" class="download-button" data-filename="${file.filename}">Download (Chunked)</a>
+                        </td>
+                    </tr>
+                `;
+            fileTableBody.innerHTML += row;
+          });
+          attachChunkedDownloadListeners(); // Attach listeners after table is updated
+        } else {
+          fileTableBody.innerHTML = `<tr><td class="border px-4 py-2 text-center" colspan="8">No PDFs generated yet.</td></tr>`;
         }
+      }
 
-        const eventSource = new EventSource("/progress");
-        let eventSourceErrored = false; // Flag to track if EventSource had an error
-
-        eventSource.onmessage = (event) => {
-          if (event.data === ": keep-alive") return;
-
-          try {
-            let data;
-            try {
-              data = JSON.parse(event.data);
-            } catch (e) {
-              if (event.data.trim() === 'data: {"type": "complete"}') {
-                data = { type: "complete" };
-              } else {
-                throw e;
-              }
-            }
-            const messageDiv = document.createElement("div");
-            switch (data.type) {
-              case "crawling_urls_init":
-                crawledUrlTableBody.innerHTML = ""; // Clear crawled URLs table initially
-                crawledUrlTableContainer.style.display = "block"; // Show crawled URLs table container
-                break;
-              case "crawling_start":
-                crawledUrlTableBody.innerHTML = ""; // Clear crawled URLs when crawling starts
-                crawledUrlTableContainer.style.display = "block"; // Ensure it's visible
-                break;
-              case "progress":
-                const percent = ((data.current / data.total) * 100).toFixed(1);
-                progressFill.style.width = `${percent}%`;
-                messageDiv.className = "message";
-                messageDiv.textContent = data.message;
-                messagesDiv.appendChild(messageDiv);
-                messagesDiv.scrollTop = messagesDiv.scrollHeight;
-                break;
-              case "message":
-                messageDiv.className = "message";
-                messageDiv.textContent = data.message;
-                messagesDiv.appendChild(messageDiv);
-                messagesDiv.scrollTop = messagesDiv.scrollHeight;
-                break;
-              case "complete":
-                eventSource.close();
-                progressContainer.style.display = "none";
-                downloadLinkDiv.style.display = "block";
-                crawledUrlTableContainer.style.display = "none"; // Hide crawled urls table after completion
-                statisticsContainer.style.display = "block"; // Show statistics container on completion
-
-                if (data.files && data.files.length > 0) {
-                  populateFileTable(data.files); // Update file table with new files
-                  document.getElementById(
-                    "download-link"
-                  ).innerHTML = `<a href="/download?filename=${
-                    data.files[0].filename
-                  }&t=${Date.now()}" target="_blank">Download PDF</a>`;
-                } else {
-                  // fileTableBody.innerHTML = `<tr><td colspan="7">No files generated.</td></tr>`; // Handled by populateFileTable if files are empty
-                  populateFileTable([]); // Update file table to reflect no new files if needed.
-                }
-
-                // Display crawled URLs in the table
-                if (data.crawled_urls && data.crawled_urls.length > 0) {
-                  crawledUrlTableBody.innerHTML = ""; // Clear existing rows
-                  data.crawled_urls.forEach((url) => {
-                    const row = crawledUrlTableBody.insertRow();
-                    const urlCell = row.insertCell();
-                    const urlLink = document.createElement("a");
-                    urlLink.href = url;
-                    urlLink.textContent = url;
-                    urlCell.appendChild(urlLink);
-                  });
-                  crawledUrlTableContainer.style.display = "block"; // Show the table
-                } else {
-                  crawledUrlTableContainer.style.display = "none"; // Hide if no crawled URLs
-                }
-
-                // Update file table again to refresh from DB and show new entry
-                loadExistingFiles();
-
-                // Example Statistics Data - Replace with actual data from backend if needed.
-                const statisticsData = [
-                  {
-                    name: "Total Links Crawled",
-                    value:
-                      data.files && data.files[0]
-                        ? data.files[0].total_links_crawled
-                        : "N/A",
-                  },
-                  {
-                    name: "Successful Pages",
-                    value:
-                      data.files && data.files[0]
-                        ? data.files[0].successful_pages
-                        : "N/A",
-                  },
-                  {
-                    name: "Failed Pages",
-                    value:
-                      data.files && data.files[0]
-                        ? data.files[0].failed_pages
-                        : "N/A",
-                  },
-                  {
-                    name: "Conversion Timestamp",
-                    value:
-                      data.files && data.files[0]
-                        ? new Date(
-                            data.files[0].conversion_timestamp
-                          ).toLocaleString()
-                        : "N/A",
-                  },
-                  {
-                    name: "Website URL",
-                    value:
-                      data.files && data.files[0]
-                        ? data.files[0].website_url
-                        : "N/A",
-                  },
-                ];
-                statisticsTableBody.innerHTML = ""; // Clear existing stats
-                statisticsData.forEach((stat) => {
-                  const row = statisticsTableBody.insertRow();
-                  row.insertCell().textContent = stat.name;
-                  row.insertCell().textContent = stat.value;
-                });
-                statisticsContainer.style.display = "block"; // Show statistics table
-
-                break;
-              case "error":
-                eventSource.close();
-                progressContainer.style.display = "none";
-                crawledUrlTableContainer.style.display = "none"; // Hide crawled urls table on error
-                statisticsContainer.style.display = "none"; // Hide statistics container on error
-                // Instead of alert, show error message in the messages div
-                const errorDiv = document.createElement("div");
-                errorDiv.className = "message error"; // Apply error class for styling
-                errorDiv.textContent = `Conversion Error: ${data.message}`;
-                messagesDiv.appendChild(errorDiv);
-                messagesDiv.scrollTop = messagesDiv.scrollHeight;
-                eventSourceErrored = true; // Set the flag when an error message is received
-
-                break;
-            }
-          } catch (e) {
-            console.error(
-              "Error handling message:",
-              e,
-              "Raw data:",
-              event.data
+      function attachChunkedDownloadListeners() {
+        document.querySelectorAll(".download-button").forEach((button) => {
+          button.addEventListener("click", async function (event) {
+            event.preventDefault();
+            const filename = this.dataset.filename;
+            const downloadUrl = `/download?filename=${filename}`;
+            const progressContainer = document.getElementById(
+              "in-browser-progress-container"
             );
-            progressContainer.style.display = "none";
-          }
-        };
+            const progressBar = document.getElementById(
+              "in-browser-progress-bar"
+            );
+            const progressMessage = document.getElementById(
+              "in-browser-progress-message"
+            );
+            const chunkProgressList = document.getElementById(
+              "chunk-progress-list"
+            );
 
-        eventSource.onerror = (error) => {
-          console.error("EventSource failed:", error);
-          if (!eventSourceErrored) {
-            // Only show generic error if specific error message hasn't been shown
-            const errorDiv = document.createElement("div");
-            errorDiv.className = "message error";
-            errorDiv.textContent =
-              "Error receiving progress updates from server. Please check your connection or server.";
-            messagesDiv.appendChild(errorDiv);
-            messagesDiv.scrollTop = messagesDiv.scrollHeight;
-          }
-          eventSource.close(); // Close EventSource on error
-        };
-      });
+            progressContainer.classList.remove("hidden"); // Show in-browser progress
+            chunkProgressList.classList.remove("hidden"); // Show chunk list
+            chunkProgressList.innerHTML = ""; // Clear chunk list
 
-      // Load existing files when page loads
-      document.addEventListener("DOMContentLoaded", loadExistingFiles);
+            const CHUNK_SIZE_MB = 1; // Chunk size in MB
+            const CHUNK_SIZE_BYTES = CHUNK_SIZE_MB * 1024 * 1024;
+            const MAX_CONNECTIONS = 5; // Number of parallel connections (Updated to 5 here!)
+
+            let downloadedChunks = new ArrayBuffer(0); // Accumulate downloaded data here
+            let totalBytes = 0;
+            let chunkCount = 0;
+            let activeDownloads = 0;
+            const chunkProgressBars = {}; // To store chunk progress bars
+
+            progressMessage.textContent = "Fetching file information...";
+
+            try {
+              const headResponse = await fetch(downloadUrl, { method: "HEAD" });
+              if (!headResponse.ok) {
+                throw new Error(
+                  `Could not get file info: ${headResponse.status}`
+                );
+              }
+              totalBytes = parseInt(
+                headResponse.headers.get("Content-Length") || "0",
+                10
+              );
+
+              if (isNaN(totalBytes) || totalBytes === 0) {
+                progressMessage.textContent =
+                  "Downloading... (size unknown, single connection)";
+                chunkProgressList.classList.add("hidden"); // Hide chunk list for single connection
+                return downloadSingleConnection(
+                  downloadUrl,
+                  filename,
+                  progressContainer,
+                  progressBar,
+                  progressMessage
+                ); // Call fallback
+              }
+
+              progressMessage.textContent = `Downloading ${formatBytes(
+                totalBytes
+              )} in chunks...`;
+              chunkProgressList.classList.remove("hidden"); // Ensure chunk list is shown
+              chunkProgressList.innerHTML = ""; // Clear any previous chunk list
+
+              chunkCount = Math.ceil(totalBytes / CHUNK_SIZE_BYTES); // Calculate chunkCount here AFTER size check
+
+              const downloadPromises = [];
+              for (let i = 0; i < chunkCount; i++) {
+                const startByte = i * CHUNK_SIZE_BYTES;
+                const endByte = Math.min(
+                  (i + 1) * CHUNK_SIZE_BYTES - 1,
+                  totalBytes - 1
+                );
+                const rangeHeader = `bytes=${startByte}-${endByte}`;
+                const chunkFilename = `${filename}.part${i + 1}`;
+
+                // Create chunk progress item in UI
+                const chunkItem = document.createElement("li");
+                chunkItem.className = "chunk-progress-item";
+                chunkItem.innerHTML = `
+                            <span class="chunk-filename" title="${chunkFilename}">${chunkFilename}</span>
+                            <div class="chunk-progress-bar-small-container">
+                                <div class="chunk-progress-bar-small" id="chunk-progress-bar-${i}"></div>
+                            </div>
+                            <span class="chunk-progress-percent">0%</span>
+                        `;
+                chunkProgressList.appendChild(chunkItem);
+                chunkProgressBars[i] = chunkItem.querySelector(
+                  `#chunk-progress-bar-${i}`
+                );
+
+                const downloadPromise = downloadChunk(
+                  downloadUrl,
+                  rangeHeader,
+                  i,
+                  chunkFilename,
+                  chunkProgressBars[i],
+                  chunkItem.querySelector(".chunk-progress-percent")
+                );
+                downloadPromises.push(downloadPromise);
+
+                activeDownloads++;
+                if (activeDownloads >= MAX_CONNECTIONS) {
+                  await Promise.race(downloadPromises); // Limit concurrent connections
+                  activeDownloads--;
+                }
+              }
+
+              await Promise.all(downloadPromises); // Wait for all chunks to download
+
+              progressMessage.textContent = "Assembling file...";
+              progressBar.style.width = "100%";
+
+              // Fetch and combine all ArrayBuffers after promises resolve
+              const chunkBuffers = await Promise.all(
+                Array.from({ length: chunkCount }, (_, i) =>
+                  getChunkDataFromCache(filename, i)
+                ) // Assuming caching is implemented (see notes)
+              );
+              const totalBufferSize = chunkBuffers.reduce(
+                (sum, buffer) => sum + buffer.byteLength,
+                0
+              );
+              downloadedChunks = new Uint8Array(totalBufferSize);
+              let offset = 0;
+              for (const buffer of chunkBuffers) {
+                downloadedChunks.set(new Uint8Array(buffer), offset);
+                offset += buffer.byteLength;
+              }
+
+              const blob = new Blob([downloadedChunks], {
+                type: "application/octet-stream",
+              });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement("a");
+              a.href = url;
+              a.download = filename;
+              document.body.appendChild(a);
+              a.click();
+              document.body.removeChild(a);
+              URL.revokeObjectURL(url);
+
+              progressContainer.classList.add("hidden");
+              chunkProgressList.classList.add("hidden");
+              progressMessage.textContent = "Download complete.";
+            } catch (error) {
+              console.error("Download error:", error);
+              progressMessage.textContent = `Download error: ${error.message}`;
+              progressContainer.classList.add("hidden");
+              chunkProgressList.classList.add("hidden");
+              alert(`Download failed: ${error.message}`);
+            }
+          });
+        });
+      }
+
+      async function downloadChunk(
+        url,
+        rangeHeader,
+        chunkIndex,
+        chunkFilename,
+        chunkProgressBar,
+        chunkPercentDisplay
+      ) {
+        try {
+          const response = await fetch(url, {
+            headers: { Range: rangeHeader },
+          });
+          if (!response.ok) {
+            throw new Error(
+              `Chunk ${chunkIndex + 1} download failed: ${response.status}`
+            );
+          }
+          const reader = response.body.getReader();
+          let receivedLength = 0;
+          const chunks = [];
+          const contentLength = parseInt(
+            response.headers.get("Content-Length"),
+            10
+          );
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) {
+              break;
+            }
+            chunks.push(value);
+            receivedLength += value.byteLength;
+
+            const progressPercent = (receivedLength / contentLength) * 100;
+            chunkProgressBar.style.width = progressPercent + "%";
+            chunkPercentDisplay.textContent = progressPercent.toFixed(0) + "%";
+          }
+          // Store chunk data (in memory for simplicity in this example, consider IndexedDB for robustness and large files)
+          const chunkData = await new Blob(chunks).arrayBuffer(); // Convert chunks to ArrayBuffer once
+          cacheChunkData(filename, chunkIndex, chunkData); // Assuming in-memory cache for this example (see notes)
+          return true;
+        } catch (error) {
+          console.error(`Chunk ${chunkIndex + 1} error:`, error);
+          chunkPercentDisplay.textContent = "Error"; // Indicate error in chunk progress
+          throw error; // Re-throw to be caught by Promise.all
+        }
+      }
+
+      async function downloadSingleConnection(
+        downloadUrl,
+        filename,
+        progressContainer,
+        progressBar,
+        progressMessage
+      ) {
+        let downloadedChunks = [];
+        let downloadedBytes = 0;
+        let totalBytes = 0;
+
+        try {
+          const response = await fetch(downloadUrl);
+          if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+          }
+
+          totalBytes = parseInt(
+            response.headers.get("Content-Length") || "0",
+            10
+          );
+          if (isNaN(totalBytes) || totalBytes === 0) {
+            progressMessage.textContent = "Downloading... (size unknown)";
+          } else {
+            progressMessage.textContent = "Downloading... (size known)";
+          }
+
+          const reader = response.body.getReader();
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) {
+              break;
+            }
+            downloadedChunks.push(value);
+            downloadedBytes += value.byteLength;
+
+            if (totalBytes > 0) {
+              const progressPercent = (downloadedBytes / totalBytes) * 100;
+              progressBar.style.width = progressPercent + "%";
+              progressMessage.textContent = `Downloading... ${progressPercent.toFixed(
+                1
+              )}%`;
+            } else {
+              progressMessage.textContent = `Downloading... ${formatBytes(
+                downloadedBytes
+              )}`;
+            }
+          }
+
+          progressMessage.textContent = "Assembling file...";
+          progressBar.style.width = "100%";
+
+          const blob = new Blob(downloadedChunks, {
+            type: "application/octet-stream",
+          });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+
+          progressContainer.classList.add("hidden");
+          progressMessage.textContent = "Download complete.";
+        } catch (error) {
+          console.error("Single connection download error:", error);
+          progressMessage.textContent = `Download error: ${error.message}`;
+          progressContainer.classList.add("hidden");
+          alert(`Download failed: ${error.message}`);
+        }
+      }
+
+      // **Placeholder for Chunk Caching (In-Memory for simplicity in this example)**
+      const chunkCache = {}; // In-memory cache - for a real app, use IndexedDB
+      function cacheChunkData(filename, chunkIndex, data) {
+        if (!chunkCache[filename]) {
+          chunkCache[filename] = {};
+        }
+        chunkCache[filename][chunkIndex] = data;
+      }
+
+      async function getChunkDataFromCache(filename, chunkIndex) {
+        return chunkCache[filename]?.[chunkIndex];
+      }
+
+      function formatBytes(bytes, decimals = 2) {
+        if (!bytes) return "0 Bytes";
+        const k = 1024;
+        const dm = decimals < 0 ? 0 : decimals;
+        const sizes = ["Bytes", "KB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB"];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return (
+          parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + " " + sizes[i]
+        );
+      }
+
+      loadFiles();
     </script>
   </body>
 </html>
