@@ -95,17 +95,30 @@ class Crawler:
         self.visited = set()
         self.to_visit = []
         self.base_domain = urlparse(root_url).netloc
+        self.root_path = urlparse(root_url).path or '/' # Get root path, default to '/' if empty
         self.visited.add(root_url)
         self.to_visit.append((root_url, 0))
         self.crawled_urls_list = [] # Store crawled URLs in order
 
     def is_valid_url(self, url: str) -> bool:
-        parsed = urlparse(url)
-        if parsed.netloc != self.base_domain:
+        parsed_url = urlparse(url)
+        parsed_root_url = urlparse(self.root_url)
+
+        if parsed_url.netloc != parsed_root_url.netloc:
             return False
-        if parsed.fragment:
+        if parsed_url.fragment:
             return False
-        return url not in self.visited
+
+        url_path = parsed_url.path
+
+        if not url_path.startswith(self.root_path):
+            if self.root_path != '/': # For root path '/', any path is valid within domain
+                return False
+
+        # Normalize URLs to avoid duplicates from trailing slashes
+        normalized_url = url.rstrip('/')
+
+        return normalized_url not in self.visited
 
     def extract_links(self, url: str, html: str) -> List[str]:
         soup = BeautifulSoup(html, 'html.parser')
@@ -122,7 +135,7 @@ class Crawler:
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             context = await browser.new_context()
-            page_pool = [await context.new_page() for _ in range(multiprocessing.cpu_count() * 2)]
+            page_pool = [await context.new_page() for _ in range(multiprocessing.cpu_count() * 2)] # Keep CPU count based workers
 
             tasks = set()
             with TqdmToQueue(desc=f"Crawling {self.root_url}", unit="page",
@@ -134,6 +147,12 @@ class Crawler:
                         url, depth = self.to_visit.pop(0)
                         if depth > self.max_depth:
                             continue
+
+                        normalized_url_for_visit = url.rstrip('/') # Normalize before adding to visited
+                        if normalized_url_for_visit in self.visited: # Check again after normalizing to prevent duplicate queueing
+                            continue
+
+                        self.visited.add(normalized_url_for_visit) # Add normalized URL to visited
                         page = page_pool.pop()
                         task = asyncio.create_task(self.crawl_page(url, depth, page))
                         tasks.add(task)
@@ -148,8 +167,8 @@ class Crawler:
                                     ordered_urls.append(result_url)
                                     self.crawled_urls_list.append(result_url) # Add to crawled URLs list
                                     for link in new_links:
-                                        if link not in self.visited:
-                                            self.visited.add(link)
+                                        normalized_link = link.rstrip('/') # Normalize link before checking and adding
+                                        if normalized_link not in self.visited:
                                             self.to_visit.append((link, result_depth + 1))
 
                                 pbar.total = len(self.visited)
@@ -316,7 +335,8 @@ async def run_conversion(url: str, max_depth: int, workers: int, output_path: st
             context = await browser.new_context()
 
             page_queue = asyncio.Queue()
-            for _ in range(multiprocessing.cpu_count() * 2):
+            num_workers = workers if workers > 0 else multiprocessing.cpu_count() * 2 # Use provided workers or default
+            for _ in range(num_workers): # Use user specified workers number here
                 page = await context.new_page()
                 await page_queue.put(page)
 
@@ -406,13 +426,18 @@ async def convert():
     current_process['output_filename'] = output_filename
     current_process['output_file'] = output_path
 
+    workers = int(data.get('workers', multiprocessing.cpu_count() * 2)) # Default to cpu_count*2 if not provided or invalid
+    if workers <= 0:
+        workers = multiprocessing.cpu_count() * 2 # Ensure workers is positive
+
+
     async def run():
         try:
             await current_process['messages'].put({'type': 'crawling_start'}) # Indicate crawling start
             await run_conversion(
                 url=data['url'],
                 max_depth=int(data['depth']),
-                workers=int(data['workers']),
+                workers=workers, # Use workers from form
                 output_path=output_path
             )
 
