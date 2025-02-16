@@ -89,22 +89,45 @@ class TqdmToQueue(tqdm):
         )
 
 class Crawler:
-    def __init__(self, root_url: str, max_depth: int = 3):
+    def __init__(self, root_url: str, max_depth: int = 3, exclude_url: str = None):
         self.root_url = root_url
         self.max_depth = max_depth
         self.visited = set()
         self.to_visit = []
         self.base_domain = urlparse(root_url).netloc
+        self.root_path = urlparse(root_url).path
+        if not self.root_path:
+            self.root_path = "/"
+        # Ensure root_path always starts and ends with a slash for consistent matching
+        if not self.root_path.startswith('/'):
+            self.root_path = '/' + self.root_path
+        if not self.root_path.endswith('/'):
+            self.root_path += '/'
+
+        self.exclude_url = exclude_url
         self.visited.add(root_url)
         self.to_visit.append((root_url, 0))
         self.crawled_urls_list = [] # Store crawled URLs in order
 
     def is_valid_url(self, url: str) -> bool:
-        parsed = urlparse(url)
-        if parsed.netloc != self.base_domain:
+        parsed_url = urlparse(url)
+        if parsed_url.netloc != self.base_domain:
             return False
-        if parsed.fragment:
+        if parsed_url.fragment:
             return False
+
+        url_path = parsed_url.path
+        # Ensure url_path also starts with a slash for consistent comparison
+        if not url_path.startswith('/'):
+            url_path = '/' + url_path
+
+        # Correctly check if the url_path starts with the root_path
+        if not url_path.startswith(self.root_path):
+            return False
+
+        if self.exclude_url and self.exclude_url in url:
+            return False
+
         return url not in self.visited
 
     def extract_links(self, url: str, html: str) -> List[str]:
@@ -122,7 +145,9 @@ class Crawler:
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             context = await browser.new_context()
-            page_pool = [await context.new_page() for _ in range(multiprocessing.cpu_count() * 2)]
+            # Limit page pool size to a reasonable number
+            page_pool_size = min(multiprocessing.cpu_count() * 2, 20)
+            page_pool = [await context.new_page() for _ in range(page_pool_size)]
 
             tasks = set()
             with TqdmToQueue(desc=f"Crawling {self.root_url}", unit="page",
@@ -173,6 +198,10 @@ class Crawler:
         try:
             await page.goto(url, timeout=120000, wait_until='networkidle')
             await page.wait_for_selector('body', timeout=30000)
+
+            # Wait for javascript to render content - Increased wait time and ensure 'body' is rendered first
+            await asyncio.sleep(5)
+
             html = await page.content()
 
             links = []
@@ -196,6 +225,9 @@ async def generate_pdf(task: Tuple[int, str, Path, asyncio.Queue]) -> Tuple[int,
         await page.goto(url, timeout=120000, wait_until='networkidle')
         await page.wait_for_selector('body', timeout=30000)
 
+        # Wait for javascript to render before pdf generation
+        await asyncio.sleep(5)
+
         try:
             await page.wait_for_selector('main', timeout=5000)
         except:
@@ -205,10 +237,10 @@ async def generate_pdf(task: Tuple[int, str, Path, asyncio.Queue]) -> Tuple[int,
         await page.emulate_media(media='print')
         await page.pdf(
             path=str(pdf_path),
-            format='A4',
+            format='A3', # Changed to A3 paper size
             print_background=True,
-            margin={'top': '20mm', 'right': '20mm',
-                    'bottom': '20mm', 'left': '20mm'}
+            margin={'top': '10mm', 'right': '10mm', # Reduced margins
+                    'bottom': '10mm', 'left': '10mm'} # Reduced margins
         )
 
         await page_queue.put(page)
@@ -298,7 +330,7 @@ def get_pdf_files_from_db():
     conn.close()
     return files
 
-async def run_conversion(url: str, max_depth: int, workers: int, output_path: str):
+async def run_conversion(url: str, max_depth: int, workers: int, output_path: str, exclude_url: str = None):
     temp_dir = Path('/tmp/temp_pages')
     temp_dir.mkdir(exist_ok=True)
     crawled_urls_list_for_display = [] # list to display on frontend before conversion
@@ -306,7 +338,7 @@ async def run_conversion(url: str, max_depth: int, workers: int, output_path: st
     start_time = time.time() # Start time for stats
 
     try:
-        crawler = Crawler(url, max_depth)
+        crawler = Crawler(url, max_depth, exclude_url=exclude_url) # Pass exclude_url to Crawler
         urls, crawled_urls_list = await crawler.crawl() # Get crawled urls list
         crawled_urls_list_for_display = crawled_urls_list # for frontend display
         current_process['crawled_urls'] = crawled_urls_list_for_display # Store for frontend to access
@@ -315,8 +347,10 @@ async def run_conversion(url: str, max_depth: int, workers: int, output_path: st
             browser = await p.chromium.launch(headless=True)
             context = await browser.new_context()
 
+            # Use multiprocessing.cpu_count() * 2 as a default page pool size, limit by workers input (clarify workers meaning)
+            page_pool_size = min(workers if workers > 0 else multiprocessing.cpu_count() * 2, 20) # Limit to 20 for reasonable load, and use workers input
             page_queue = asyncio.Queue()
-            for _ in range(multiprocessing.cpu_count() * 2):
+            for _ in range(page_pool_size):
                 page = await context.new_page()
                 await page_queue.put(page)
 
@@ -402,6 +436,8 @@ async def convert():
         filename = 'output'
     output_filename = f"{filename}.pdf"
     output_path = os.path.join(OUTPUT_DIR, output_filename)
+    exclude_url = data.get('exclude_url', None) # Get exclude URL from form
+    workers_input = int(data.get('workers', 2)) # Get workers from form, default to 2 if not provided, convert to int
 
     current_process['output_filename'] = output_filename
     current_process['output_file'] = output_path
@@ -412,8 +448,9 @@ async def convert():
             await run_conversion(
                 url=data['url'],
                 max_depth=int(data['depth']),
-                workers=int(data['workers']),
-                output_path=output_path
+                workers=workers_input, # Use workers input from form
+                output_path=output_path,
+                exclude_url=exclude_url # Pass exclude_url to run_conversion
             )
 
             if current_process['output_file'] and os.path.exists(current_process['output_file']):
@@ -440,6 +477,7 @@ async def progress():
     async def generate():
         try:
             yield f"data: {json.dumps({'type': 'crawling_urls_init'})}\n\n" # Initial signal to clear crawled URL table on frontend
+            messages_count = 0 # Initialize message counter
             while True:
                 try:
                     message = await asyncio.wait_for(
@@ -453,7 +491,9 @@ async def progress():
                 if message['type'] == 'progress':
                     yield f"data: {json.dumps(message)}\n\n"
                 elif message['type'] == 'message':
-                    yield f"data: {json.dumps({'type': 'message', 'message': message['message']})}\n\n"
+                    messages_count += 1
+                    message_payload = {'type': 'message', 'message': message['message'], 'count': messages_count} # Send message count
+                    yield f"data: {json.dumps(message_payload)}\n\n"
                 elif message['type'] == 'crawling_start':
                     yield f"data: {json.dumps({'type': 'crawling_start'})}\n\n" # Signal crawling started
                 elif message['type'] == 'complete':
